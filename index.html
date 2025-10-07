@@ -1,995 +1,2622 @@
-'use client';
-
-import { useState, useEffect } from 'react';
-import { differenceInDays } from 'date-fns';
-import { motion, AnimatePresence } from 'framer-motion';
-import { db } from '@/firebase/config';
-import {
-  collection,
-  addDoc,
-  getDocs,
-  doc,
-  deleteDoc,
-  updateDoc,
-  setDoc,
-} from 'firebase/firestore';
-
-const tabs = ['Records', 'UFL PC', 'UFL PS5', 'UFL XBOX', 'Fights', 'Admin'] as const;
-type Tab = typeof tabs[number];
-const platforms = ['UFL PC', 'UFL PS5', 'UFL XBOX'] as const;
-type Platform = typeof platforms[number];
-
-type Fighter = {
-  firebaseId: string;
-  originalName?: string; // ✅ add this
-  name: string;
-  platform: Platform;
-  wins: number;
-  losses: number;
-  draws: number;
-  koWins: number;
-  champion?: boolean;
-};
-
-type Fight = {
-  id: string; // ✅ This must be defined
-  fighter1: string;
-  fighter2: string;
-  winner: string;
-  method: 'KO' | 'Decision' | 'Draw';
-  platform: Platform;
-  date: string;
-};
-
-
-export default function Home() {
-  const [tab, setTab] = useState<Tab>('Records');
-  const [fighters, setFighters] = useState<Fighter[]>([]);
-  const [search, setSearch] = useState('');
-  const [fights, setFights] = useState<Fight[]>([]);
-  const [adminMode, setAdminMode] = useState(false);
-  const [passwordInput, setPasswordInput] = useState('');
-
-  const updateFighterNameInFights = async (oldName: string, newName: string) => {
-    const snapshot = await getDocs(collection(db, 'fights'));
-  
-    const updates = snapshot.docs.map(async (docSnap) => {
-      const fight = docSnap.data() as Fight;
-      const updatedFight = { ...fight };
-  
-      let changed = false;
-  
-      if (fight.fighter1 === oldName) {
-        updatedFight.fighter1 = newName;
-        changed = true;
-      }
-      if (fight.fighter2 === oldName) {
-        updatedFight.fighter2 = newName;
-        changed = true;
-      }
-      if (fight.winner === oldName) {
-        updatedFight.winner = newName;
-        changed = true;
-      }
-  
-      if (changed) {
-        await updateDoc(doc(db, 'fights', docSnap.id), updatedFight);
-      }
-    });
-  
-    await Promise.all(updates);
-  };  
-
-  const resyncFighterRecords = async () => {
-    const snapshot = await getDocs(collection(db, 'fighters'));
-    const fightSnap = await getDocs(collection(db, 'fights'));
-  
-    const fightersData = snapshot.docs.map(doc => ({
-      ...doc.data(),
-      firebaseId: doc.id,
-    })) as Fighter[];
-  
-    for (const fighter of fightersData) {
-      const name = fighter.name;
-      const fights = fightSnap.docs.map(doc => doc.data()) as Fight[];
-  
-      const relevantFights = fights.filter(
-        fight => fight.fighter1 === name || fight.fighter2 === name
-      );
-  
-      let wins = 0, losses = 0, draws = 0, koWins = 0;
-  
-      relevantFights.forEach(fight => {
-        if (fight.winner === name) {
-          wins++;
-          if (fight.method === 'KO') koWins++;
-        } else if (
-          (fight.fighter1 === name || fight.fighter2 === name) &&
-          fight.winner === 'Draw'
-        ) {
-          draws++;
-        } else if (
-          fight.fighter1 === name ||
-          fight.fighter2 === name
-        ) {
-          losses++;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>UFL World Rankings</title>
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.0/firebase-firestore-compat.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Oxanium:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
+    <style>
+        :root {
+            --gold: #FFD700;
+            --dark-gold: #FFC000;
+            --black: #000000;
+            --white: #FFFFFF;
+            --gray: #C0C0C0;
+            --dark-gray: #333333;
+            --light-gray: #E5E5E5;
+            --dark-bg: #111111;
         }
-      });
-  
-      await updateDoc(doc(db, 'fighters', fighter.firebaseId), {
-        wins,
-        losses,
-        draws,
-        koWins,
-      });
-    }
-  
-    await fetchFighters(); // Refresh state
-  };   
+        
+        body {
+            font-family: 'Oxanium', sans-serif;
+            background-color: var(--black);
+            color: var(--white);
+            min-height: 100vh;
+            transition: background-color 0.5s ease;
+        }
 
-  const getSortedFighters = (platform: Platform): Fighter[] => {
-    const fightersForPlatform = fighters.filter(f => f.platform === platform);
-  
-    const scored = fightersForPlatform.map(f => {
-      const qualityScore = 0; // You can replace with logic based on who they beat
-      const recencyBonus = 0; // You can replace with logic based on recent fights
-  
-      return {
-        ...f,
-        score: f.wins * 5 - f.losses * 2 + qualityScore + recencyBonus,
-      };
-    });
-  
-    const sorted = scored.sort((a, b) => b.score - a.score);
-    const recentFights = fights.filter(f => f.platform === platform);
-  
-    return applyHeadToHeadOverrides(sorted, recentFights);
-  };  
-  
-  const applyHeadToHeadOverrides = (fighters: Fighter[], fights: Fight[]): Fighter[] => {
-    const platformGroups: Record<Platform, Fighter[]> = {
-      'UFL PC': [],
-      'UFL PS5': [],
-      'UFL XBOX': [],
-    };
-  
-    // Group fighters by platform
-    fighters.forEach(f => {
-      platformGroups[f.platform].push(f);
-    });
-  
-    const result: Fighter[] = [];
-  
-    for (const platform of platforms) {
-      const group = platformGroups[platform];
-  
-      // Create base scores
-      const baseScores: Record<string, number> = {};
-      group.forEach(f => {
-        baseScores[f.name] = f.wins * 5 - f.losses * 2 + f.koWins * 2;
-      });
-  
-      // Build head-to-head wins map
-      const h2hWins: Record<string, Set<string>> = {};
-      fights
-        .filter(f => f.platform === platform && f.winner !== 'Draw')
-        .forEach(f => {
-          const loser = f.winner === f.fighter1 ? f.fighter2 : f.fighter1;
-          if (!h2hWins[f.winner]) h2hWins[f.winner] = new Set();
-          h2hWins[f.winner].add(loser);
-        });
-  
-      // Sort with head-to-head taking priority
-      const sorted = [...group].sort((a, b) => {
-        const aBeatsB = h2hWins[a.name]?.has(b.name);
-        const bBeatsA = h2hWins[b.name]?.has(a.name);
-  
-        if (aBeatsB && !bBeatsA) return -1;
-        if (bBeatsA && !aBeatsB) return 1;
-  
-        return (baseScores[b.name] ?? 0) - (baseScores[a.name] ?? 0);
-      });
-  
-      result.push(...sorted);
-    }
-  
-    return result;
-  };   
+        body.pc-bg {
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(139, 0, 0, 0.15) 0%, transparent 20%),
+                radial-gradient(circle at 90% 80%, rgba(192, 192, 192, 0.15) 0%, transparent 20%);
+            background-color: #1a0000;
+        }
 
-  const handleDeleteFight = async (id: string) => {
-    console.log('Deleting fight:', id); // optional debug
-    await deleteDoc(doc(db, 'fights', id));
-    await fetchFights();    // refresh list after deletion
-    await fetchFighters();  // refresh records too
-  };  
-  
-  const handleAddFight = async () => {
-    const { fighter1, fighter2, winner, method, date, platform } = newFight;
-    if (!fighter1 || !fighter2 || !winner || !method || !date) return;
-  
-    await addDoc(collection(db, 'fights'), {
-      fighter1,
-      fighter2,
-      winner,
-      method,
-      date,
-      platform,
-    });
-  
-    await updateRecordsAfterFight(newFight); // update stats
-  
-    await fetchFighters(); // <-- Refresh fighters after update
-    await fetchFights();   // optional: refresh fights list
-  
-    setNewFight({
-  id: crypto.randomUUID(),
-  fighter1: '',
-  fighter2: '',
-  winner: '',
-      method: 'Decision',
-      date: '',
-      platform: 'UFL PC',
-    });
-  };     
+        body.ps5-bg {
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(0, 105, 148, 0.15) 0%, transparent 20%),
+                radial-gradient(circle at 90% 80%, rgba(192, 192, 192, 0.15) 0%, transparent 20%);
+            background-color: #00051a;
+        }
 
-  const handleAddFighter = async () => {
-    if (!newFighter.name.trim()) return;
-  
-    await setDoc(doc(db, 'fighters', `${newFighter.name}-${newFighter.platform}`), {
-      name: newFighter.name,
-      platform: newFighter.platform,
-      wins: 0,
-      losses: 0,
-      draws: 0,
-      koWins: 0,
-      champion: false,
-    });
-  
-    await fetchFighters();
-    setNewFighter({ name: '', platform: 'UFL PC' });
-  };  
+        body.xbox-bg {
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(14, 122, 13, 0.15) 0%, transparent 20%),
+                radial-gradient(circle at 90% 80%, rgba(192, 192, 192, 0.15) 0%, transparent 20%);
+            background-color: #001a00;
+        }
 
-  const updateRecordsAfterFight = async (fight: Fight) => {
-    const updated = [...fighters];
-  
-    for (const f of updated) {
-      if (f.name === fight.fighter1 || f.name === fight.fighter2) {
-        const isWinner = f.name === fight.winner;
-        const isDraw = fight.method === 'Draw';
-        const isKO = fight.method === 'KO';
-  
-        f.wins += isWinner && !isDraw ? 1 : 0;
-        f.losses += !isWinner && !isDraw ? 1 : 0;
-        f.draws += isDraw ? 1 : 0;
-        f.koWins += isWinner && isKO ? 1 : 0;
-  
-        await updateDoc(doc(db, 'fighters', `${f.name}-${f.platform}`), {
-          wins: f.wins,
-          losses: f.losses,
-          draws: f.draws,
-          koWins: f.koWins,
-        });
-      }
-    }
-  
-    await fetchFighters(); // ✅ Refresh fighters in UI
-  };   
+        body.default-bg {
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(255, 215, 0, 0.15) 0%, transparent 20%),
+                radial-gradient(circle at 90% 80%, rgba(192, 192, 192, 0.15) 0%, transparent 20%);
+            background-color: var(--black);
+        }
 
-  const updateFighterField = (
-    id: string,
-    field: keyof Fighter,
-    value: any
-  ) => {
-    setFighters((prev) =>
-      prev.map((f) => (f.firebaseId === id ? { ...f, [field]: value } : f))
-    );
-  };  
+        @media (max-width: 640px) {
+            .container {
+                padding-left: 0.5rem;
+                padding-right: 0.5rem;
+            }
+            
+            .fighter-card {
+                padding: 0.75rem;
+            }
+            
+            .tab-btn {
+                padding: 0.25rem 0.5rem;
+                font-size: 0.75rem;
+            }
+            
+            .frosted-glass {
+                padding: 0.75rem;
+            }
+            
+            /* Hide scrollbar but keep functionality */
+            .no-scrollbar {
+                -ms-overflow-style: none;
+                scrollbar-width: none;
+            }
+            .no-scrollbar::-webkit-scrollbar {
+                display: none;
+            }
+            
+            /* Adjust table cell padding */
+            td, th {
+                padding: 0.25rem 0.5rem;
+            }
+            
+            /* Simplify some elements on mobile */
+            .hidden-mobile {
+                display: none;
+            }
 
-// Admin form state
-const [newFighter, setNewFighter] = useState({ name: '', platform: 'UFL PC' as Platform });
-const [newFight, setNewFight] = useState<Fight>({
-  id: '',               // ✅ ADD THIS
-  fighter1: '',
-  fighter2: '',
-  winner: '',
-  method: 'Decision',
-  platform: 'UFL PC',
-  date: '',
-});
+            /* Champion card positioning on mobile */
+            .platform-rankings-container > div:last-child {
+                order: -1;
+                margin-bottom: 1rem;
+            }
 
-const [fighterSearch1, setFighterSearch1] = useState('');
-const [fighterSearch2, setFighterSearch2] = useState('');
-const [searchFighter, setSearchFighter] = useState('');
-const [searchFight, setSearchFight] = useState('');
+            /* Platform rankings layout on mobile */
+            .platform-rankings-container {
+                display: flex;
+                flex-direction: column;
+            }
+        }
+        
+        .header-font {
+            font-family: 'Orbitron', sans-serif;
+        }
+        
+        .frosted-glass {
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--gold);
+        }
+        
+        .gold-text {
+            color: var(--gold);
+            text-shadow: 0 0 5px var(--gold), 0 0 10px var(--dark-gold);
+        }
+        
+        .silver-text {
+            color: var(--gray);
+            text-shadow: 0 0 5px var(--gray), 0 0 10px var(--gray);
+        }
+        
+        .glow-gold:hover {
+            box-shadow: 0 0 10px var(--gold), 0 0 20px var(--dark-gold);
+        }
+        
+        .glow-silver:hover {
+            box-shadow: 0 0 10px var(--gray), 0 0 20px var(--gray);
+        }
+        
+        .glow-gray:hover {
+            box-shadow: 0 0 10px #888, 0 0 20px #888;
+        }
+        
+        .tab-active {
+            border-bottom: 2px solid var(--gold);
+            color: var(--gold);
+        }
+        
+        .champion-card {
+            position: relative;
+            overflow: hidden;
+            transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+            transform-style: preserve-3d;
+            animation: pulse 2s ease-in-out infinite alternate;
+            will-change: transform;
+        }
 
-const fetchFights = async () => {
-  const snapshot = await getDocs(collection(db, 'fights'));
-  const data = snapshot.docs.map(doc => ({
-    id: doc.id, // 👈 Important: Add this line
-    ...doc.data(),
-  })) as Fight[];
-  setFights(data);
-};
+        .champion-card::after {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: linear-gradient(
+                to bottom right,
+                rgba(255,215,0,0) 0%,
+                rgba(255,215,0,0.1) 20%,
+                rgba(255,215,0,0) 40%,
+                rgba(255,215,0,0.1) 60%,
+                rgba(255,215,0,0) 80%,
+                rgba(255,215,0,0.1) 100%
+            );
+            transform: rotate(30deg);
+            animation: shine 4s linear infinite;
+        }
 
-  const getFighterStats = (name: string) => {
-    const fighterFights = fights.filter(
-      f => f.fighter1 === name || f.fighter2 === name
-    );
-  
-    let wins = 0, losses = 0, draws = 0, koWins = 0;
-  
-    fighterFights.forEach(f => {
-      if (f.method === 'Draw') {
-        draws++;
-      } else if (f.winner === name) {
-        wins++;
-        if (f.method === 'KO') koWins++;
-      } else {
-        losses++;
-      }
-    });
-  
-    return { wins, losses, draws, koWins };
-  };  
+        @keyframes pulse {
+            0% { transform: scale(1); box-shadow: 0 0 20px rgba(255,215,0,0.3); }
+            100% { transform: scale(1.01); box-shadow: 0 0 40px rgba(255,215,0,0.6); }
+        }
 
-  const addFighter = async () => {
-    if (!newFighter.name) return;
-    const exists = fighters.find(f => f.name === newFighter.name && f.platform === newFighter.platform);
-    if (exists) return alert('Fighter with this name already exists on this platform!');
-    const fighter: Fighter = { ...newFighter, firebaseId: '', wins: 0, losses: 0, draws: 0, koWins: 0, champion: false };
-    await addDoc(collection(db, 'fighters'), fighter);
-    fetchFighters();
-    setNewFighter({ name: '', platform: 'UFL PC' });
-  };
+        .pc-champion {
+            background: linear-gradient(145deg, rgba(90, 0, 0, 0.4), rgba(40, 0, 0, 0.8)) !important;
+            border: 2px solid #8B0000 !important;
+            box-shadow: 0 0 30px rgba(139, 0, 0, 0.6);
+        }
 
-  const addFight = async () => {
-    const f1 = fighters.find(f => f.name === newFight.fighter1);
-    const f2 = fighters.find(f => f.name === newFight.fighter2);
-    if (!f1 || !f2) return alert('Fighters must exist');
+        .ps5-champion {
+            background: linear-gradient(145deg, rgba(0, 70, 120, 0.4), rgba(0, 30, 70, 0.8)) !important;
+            border: 2px solid #006994 !important;
+            box-shadow: 0 0 30px rgba(0, 105, 148, 0.6);
+        }
 
-    // Update records
-    const updatedFighters = fighters.map(f => {
-      if (f.name === newFight.fighter1 || f.name === newFight.fighter2) {
-        const isWinner = f.name === newFight.winner;
-        const isDraw = newFight.method === 'Draw';
-        return {
-          ...f,
-          wins: isWinner && !isDraw ? f.wins + 1 : f.wins,
-          losses: !isWinner && !isDraw ? f.losses + 1 : f.losses,
-          draws: isDraw ? f.draws + 1 : f.draws,
-          koWins: isWinner && newFight.method === 'KO' ? f.koWins + 1 : f.koWins,
-        };
-      }
-      return f;
-    });
+        .xbox-champion {
+            background: linear-gradient(145deg, rgba(0, 90, 0, 0.4), rgba(0, 40, 0, 0.8)) !important;
+            border: 2px solid #0E7A0D !important;
+            box-shadow: 0 0 30px rgba(14, 122, 13, 0.6);
+        }
 
-    // Save updated fighters
-    const snapshot = await getDocs(collection(db, 'fighters'));
-    snapshot.docs.forEach(async d => {
-      const data = d.data() as Fighter;
-      const updated = updatedFighters.find(f => f.name === data.name);
-      if (updated) await updateDoc(doc(db, 'fighters', d.id), updated);
-    });
+        .pc-champion::after {
+            background: linear-gradient(
+                to bottom right,
+                rgba(139,0,0,0) 0%,
+                rgba(139,0,0,0.2) 20%,
+                rgba(139,0,0,0) 40%,
+                rgba(139,0,0,0.2) 60%,
+                rgba(139,0,0,0) 80%,
+                rgba(139,0,0,0.2) 100%
+            );
+        }
 
-    await addDoc(collection(db, 'fights'), newFight);
-    setNewFight({
-  id: crypto.randomUUID(),
-  fighter1: '',
-  fighter2: '',
-  winner: '', method: 'Decision', platform: 'UFL PC', date: '' });
-    fetchFights();
-    fetchFighters();
-  };
+        .ps5-champion::after {
+            background: linear-gradient(
+                to bottom right,
+                rgba(0,105,148,0) 0%,
+                rgba(0,105,148,0.2) 20%,
+                rgba(0,105,148,0) 40%,
+                rgba(0,105,148,0.2) 60%,
+                rgba(0,105,148,0) 80%,
+                rgba(0,105,148,0.2) 100%
+            );
+        }
 
-  const calculateRanking = (platform: Platform) => {
-    const platformFighters = fighters.filter(f => f.platform === platform);
-    const scores = platformFighters.map(f => {
-      const recentFights = fights.filter(fight => fight.platform === platform);
-      const opponents = recentFights.filter(
-        fight => fight.winner === f.name
-      ).map(fight => {
-        const opponentName = fight.fighter1 === f.name ? fight.fighter2 : fight.fighter1;
-        return fighters.find(x => x.name === opponentName)?.wins || 0;
-      });
-      const quality = opponents.reduce((a, b) => a + b, 0);
-      return {
-        fighter: f,
-        score: f.wins * 5 - f.losses * 2 + quality,
-      };
-    });
+        .xbox-champion::after {
+            background: linear-gradient(
+                to bottom right,
+                rgba(14,122,13,0) 0%,
+                rgba(14,122,13,0.2) 20%,
+                rgba(14,122,13,0) 40%,
+                rgba(14,122,13,0.2) 60%,
+                rgba(14,122,13,0) 80%,
+                rgba(14,122,13,0.2) 100%
+            );
+        }
 
-    scores.sort((a, b) => b.score - a.score);
-    return scores.map(s => s.fighter);
-  };
+        @keyframes float {
+            0%, 100% { transform: translateX(-50%) translateY(0px); }
+            50% { transform: translateX(-50%) translateY(-10px); }
+        }
 
-  const handlePasswordSubmit = () => {
-    if (passwordInput === 'G36DSFGB3873GFDIY38HS9I34G') setAdminMode(true);
-    setPasswordInput('');
-  };
+        @keyframes rotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
 
-// ✅ Step 1: fetchFighters defined BEFORE useEffect
-const fetchFighters = async () => {
-  const snapshot = await getDocs(collection(db, 'fighters'));
-  const data = snapshot.docs.map(doc => {
-    const fighter = doc.data() as Fighter;
-    return {
-      ...fighter,
-      firebaseId: doc.id,
-      originalName: fighter.name, // ✅ Required for renaming sync
-    };
-  });
-  
+        @keyframes shine {
+            0% { background-position: -100% 0; }
+            100% { background-position: 100% 0; }
+        }
 
-  setFighters(data);
-};
+        @keyframes pulse {
+            0% { transform: translateX(-50%) scale(1); }
+            50% { transform: translateX(-50%) scale(1.1); }
+            100% { transform: translateX(-50%) scale(1); }
+        }
+        
+        /* Animation Classes */
+        .animate-fade-in {
+            animation: fadeIn 0.5s ease-out forwards;
+        }
+        
+        .animate-slide-up {
+            animation: slideUp 0.5s ease-out forwards;
+        }
+        
+        .animate-slide-down {
+            animation: slideDown 0.5s ease-out forwards;
+        }
+        
+        .animate-slide-left {
+            animation: slideLeft 0.5s ease-out forwards;
+        }
+        
+        .animate-slide-right {
+            animation: slideRight 0.5s ease-out forwards;
+        }
+        
+        .animate-fadeInScale {
+            animation: fadeInScale 0.5s ease-out forwards;
+        }
+        
+        .animate-pop-in {
+            animation: popIn 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        
+        .animate-shake {
+            animation: shake 0.5s ease-in-out;
+        }
+        
+        /* Keyframes */
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        @keyframes fadeOut {
+            from { opacity: 1; }
+            to { opacity: 0; }
+        }
 
-// ✅ Step 2: useEffect calls it safely
-useEffect(() => {
-  fetchFighters();
-  fetchFights();
-}, []);
+        @keyframes slideDown {
+            from { 
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to { 
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
 
-  return (
-    <div className="min-h-screen bg-gradient-to-b from-black via-gray-900 to-black text-white p-4">
-      <div className="text-center text-4xl font-bold mb-6">UFL World Rankings</div>
+        @keyframes fadeOut {
+            from { opacity: 1; }
+            to { opacity: 0; }
+        }
+        
+        @keyframes slideUp {
+            from { 
+                opacity: 0;
+                transform: translateY(30px) scale(0.98);
+            }
+            to { 
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
 
-      <div className="flex justify-center gap-4 mb-6 flex-wrap">
-        {tabs.map(t => (
-          <motion.button
-            key={t}
-            whileHover={{ scale: 1.1 }}
-            whileTap={{ scale: 0.95 }}
-            className={`px-4 py-2 rounded-2xl text-lg shadow-md ${
-              tab === t ? 'bg-white text-black' : 'bg-gray-800'
-            }`}
-            onClick={() => setTab(t)}
-          >
-            {t}
-          </motion.button>
-        ))}
-      </div>
+        @keyframes slideDown {
+            from { 
+                opacity: 0;
+                transform: translateY(-30px) scale(0.98);
+            }
+            to { 
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
 
-      
-{(tab === 'Records' || tab === 'Fights') && (
-  <div className="flex justify-center mb-4">
-    <input
-      type="text"
-      value={search}
-      onChange={(e) => setSearch(e.target.value)}
-      placeholder="Search..."
-      className="px-4 py-2 w-full max-w-md rounded-xl text-white bg-gray-800 border border-gray-600"
-    />
-  </div>
-)}
+        @keyframes slideInLeft {
+            from { 
+                opacity: 0;
+                transform: translateX(30px);
+            }
+            to { 
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
 
-<AnimatePresence mode="wait">
-        <motion.div
-          key={tab}
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -10 }}
-          transition={{ duration: 0.3 }}
-          className="max-w-4xl mx-auto"
-        >
-{tab === 'Records' && (
-  <div className="space-y-4">
-    {fighters
-.filter(f => (adminMode || f.name?.trim()) && f.name.toLowerCase().includes(search.toLowerCase()))
-      .map(f => {
-        const stats = getFighterStats(f.name);
-        return (
-          <div key={f.name} className="bg-gray-800 p-4 rounded-xl shadow-lg flex justify-between items-center">
-            <div>
-              <div className="text-xl font-semibold">{f.name}</div>
-              <div className="text-sm text-gray-300">{f.platform}</div>
+        @keyframes slideInRight {
+            from { 
+                opacity: 0;
+                transform: translateX(-30px);
+            }
+            to { 
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        @keyframes fadeInScale {
+            0% {
+                opacity: 0;
+                transform: scale(0.95);
+            }
+            100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+        
+        @keyframes popIn {
+            0% {
+                opacity: 0;
+                transform: scale(0.8);
+            }
+            50% {
+                opacity: 1;
+                transform: scale(1.05);
+            }
+            100% {
+                transform: scale(1);
+            }
+        }
+        
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            20%, 60% { transform: translateX(-5px); }
+            40%, 80% { transform: translateX(5px); }
+        }
+        
+        /* Component Animations */
+        .fighter-card {
+            transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+            transform-style: preserve-3d;
+            animation: fadeIn 0.5s ease-out forwards, float 6s ease-in-out infinite;
+            position: relative;
+            will-change: transform;
+        }
+        
+        .fighter-card:hover {
+            transform: translateY(-8px) scale(1.03) rotate(1deg);
+            box-shadow: 0 15px 30px rgba(255, 215, 0, 0.4);
+            z-index: 10;
+        }
+
+        .fighter-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            border-radius: inherit;
+            background: linear-gradient(45deg, 
+                rgba(255,215,0,0.1) 0%, 
+                rgba(255,215,0,0) 20%, 
+                rgba(255,215,0,0) 80%, 
+                rgba(255,215,0,0.1) 100%);
+            opacity: 0;
+            transition: opacity 0.4s ease;
+        }
+
+        .fighter-card:hover::before {
+            opacity: 1;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0) rotate(0deg); }
+            25% { transform: translateY(-5px) rotate(0.5deg); }
+            50% { transform: translateY(-10px) rotate(-0.5deg); }
+            75% { transform: translateY(-5px) rotate(0.5deg); }
+        }
+
+        @keyframes shine {
+            0% { background-position: -100% 0; }
+            100% { background-position: 100% 0; }
+        }
+        
+        /* Tab switching animation */
+        .tab-panel {
+            will-change: transform, opacity;
+            transform: translateZ(0);
+            backface-visibility: hidden;
+            animation: fadeIn 0.3s ease-out forwards;
+        }
+
+        .animate-slideLeft {
+            animation: slideLeft 0.3s ease-out forwards;
+        }
+
+        .animate-slideRight {
+            animation: slideRight 0.3s ease-out forwards;
+        }
+
+        /* Pagination styles */
+        .pagination {
+            display: flex;
+            justify-content: center;
+            gap: 0.5rem;
+            margin-top: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .pagination button {
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.375rem;
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--gold);
+            color: var(--white);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .pagination button:hover {
+            background: rgba(255, 215, 0, 0.2);
+        }
+
+        .pagination button.active {
+            background: var(--gold);
+            color: var(--black);
+            font-weight: bold;
+        }
+
+        .pagination button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        /* Button hover effects */
+        button {
+            transition: all 0.2s ease;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+        }
+        
+        /* Input focus effects */
+        input, select {
+            transition: all 0.2s ease;
+        }
+        
+        input:focus, select:focus {
+            transform: scale(1.01);
+        }
+        
+        .ko-badge {
+            animation: pulse 1.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
+        }
+        
+        .fade-in {
+            animation: fadeIn 0.5s ease-in;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--gold);
+            box-shadow: 0 0 5px var(--gold);
+        }
+        
+        .platform-pc {
+            border-color: var(--gray);
+            color: var(--gray);
+        }
+        
+        .platform-ps5 {
+            border-color: var(--gray);
+            color: var(--gray);
+        }
+        
+        .platform-xbox {
+            border-color: var(--gray);
+            color: var(--gray);
+        }
+    </style>
+</head>
+<body class="min-h-screen default-bg">
+    <!-- Main Container -->
+    <div class="container mx-auto px-2 sm:px-4 py-4 sm:py-8 max-w-7xl">
+        <!-- Header -->
+        <header class="text-center mb-4 sm:mb-6 md:mb-12 animate-slide-up">
+            <h1 class="text-xl sm:text-2xl md:text-4xl lg:text-6xl font-bold mb-1 sm:mb-2 md:mb-4 header-font neon-red animate-pop-in" style="animation-delay: 0.2s">UFL WORLD RANKINGS</h1>
+        </header>
+        
+        <!-- Tabs Navigation -->
+        <div class="flex justify-center mb-3 sm:mb-4 md:mb-8 px-1">
+            <div class="frosted-glass rounded-lg p-1 flex flex-nowrap justify-start sm:justify-center gap-1 overflow-x-auto w-full no-scrollbar">
+                <button onclick="switchTab('records')" class="tab-btn px-3 py-1 sm:px-4 sm:py-2 rounded-md font-medium transition-all hover:bg-gray-900/50 glow-gold header-font animate-fade-in whitespace-nowrap" style="animation-delay: 0.3s" data-tab="records">
+                    <i class="fas fa-users sm:mr-2"></i><span class="hidden sm:inline">Records</span>
+                </button>
+                <button onclick="switchTab('pc')" class="tab-btn px-4 py-2 rounded-md font-medium transition-all hover:bg-blue-900/30 glow-blue header-font animate-pop-in" style="animation-delay: 0.35s; animation-duration: 0.6s;" data-tab="pc">
+                    <i class="fab fa-windows mr-2"></i>UFL PC
+                </button>
+                <button onclick="switchTab('ps5')" class="tab-btn px-4 py-2 rounded-md font-medium transition-all hover:bg-blue-900/30 glow-blue header-font animate-pop-in" style="animation-delay: 0.4s; animation-duration: 0.6s;" data-tab="ps5">
+                    <i class="fab fa-playstation mr-2"></i>UFL PS5
+                </button>
+                <button onclick="switchTab('xbox')" class="tab-btn px-4 py-2 rounded-md font-medium transition-all hover:bg-blue-900/30 glow-blue header-font animate-pop-in" style="animation-delay: 0.45s; animation-duration: 0.6s;" data-tab="xbox">
+                    <i class="fab fa-xbox mr-2"></i>UFL XBOX
+                </button>
+                <button onclick="switchTab('fights')" class="tab-btn px-4 py-2 rounded-md font-medium transition-all hover:bg-purple-900/30 glow-purple header-font animate-pop-in" style="animation-delay: 0.5s; animation-duration: 0.6s;" data-tab="fights">
+                    <i class="fas fa-fist-raised mr-2"></i>Fights
+                </button>
+                <button onclick="switchTab('admin')" class="tab-btn px-4 py-2 rounded-md font-medium transition-all hover:bg-red-900/30 glow-red header-font animate-pop-in" style="animation-delay: 0.55s; animation-duration: 0.6s;" data-tab="admin">
+                    <i class="fas fa-lock mr-2"></i>Admin
+                </button>
             </div>
-            <div className="text-right">
-              <div>W: {stats.wins} | L: {stats.losses} | D: {stats.draws}</div>
-              <div>KO Wins: {stats.koWins}</div>
-            </div>
-          </div>
-        );
-      })}
-  </div>
-)}
-
-          {tab === 'Fights' && (
-            <div className="space-y-4">
-              {fights.filter(f => f.fighter1.toLowerCase().includes(search.toLowerCase()) || f.fighter2.toLowerCase().includes(search.toLowerCase()) || f.winner.toLowerCase().includes(search.toLowerCase())).map((f, i) => (
-                <div key={i} className="bg-gray-800 p-4 rounded-xl shadow">
-                  <div className="font-semibold">{f.fighter1} vs {f.fighter2}</div>
-                  <div>Winner: {f.winner} by {f.method} on {f.date}</div>
+        </div>
+        
+        <!-- Tab Content -->
+        <div class="frosted-glass rounded-xl p-2 sm:p-4 md:p-6 mb-4 sm:mb-6 md:mb-8 min-h-[300px] sm:min-h-[400px] animate-fade-in" style="animation-delay: 0.4s" id="tab-content">
+            <!-- Records Tab (Default) -->
+            <div id="records-tab" class="tab-panel">
+                <h2 class="text-2xl md:text-3xl font-bold mb-6 header-font neon-purple flex items-center">
+                    <i class="fas fa-users mr-3"></i>Fighter Records
+                </h2>
+                
+                <div class="mb-6 flex flex-wrap gap-4">
+                    <div class="relative flex-grow max-w-md">
+                        <input type="text" id="fighter-search" placeholder="Search fighters..." 
+                            class="w-full bg-gray-900/50 border border-gold/50 rounded-lg py-2 px-4 text-white focus:border-gold focus:ring-1 focus:ring-gold">
+                        <i class="fas fa-search absolute right-3 top-3 text-purple-400"></i>
+                    </div>
+                    <select id="platform-filter" class="bg-gray-900/50 border border-purple-500/50 rounded-lg py-2 px-4 text-white">
+                        <option value="all">All Platforms</option>
+                        <option value="PC">PC</option>
+                        <option value="PS5">PS5</option>
+                        <option value="XBOX">XBOX</option>
+                    </select>
                 </div>
-              ))}
+                
+                <!-- Pagination for fighters -->
+                <div id="fighters-pagination" class="pagination mb-4"></div>
+                
+                <div class="overflow-x-auto">
+                    <table class="w-full border-collapse text-xs sm:text-sm md:text-base">
+                        <thead>
+                            <tr class="border-b border-purple-500/30">
+                                <th class="py-1 px-1 sm:py-2 sm:px-2 md:py-3 md:px-4 text-left font-bold text-gold">Fighter</th>
+                                <th class="py-2 px-2 sm:py-3 sm:px-4 text-left font-bold text-gold">Platform</th>
+                                <th class="py-2 px-2 sm:py-3 sm:px-4 text-left font-bold text-gold">Record</th>
+                                <th class="py-2 px-2 sm:py-3 sm:px-4 text-left font-bold text-gold">KOs</th>
+                                <th class="py-2 px-2 sm:py-3 sm:px-4 text-left font-bold text-gold">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="fighters-table-body">
+                            <!-- Fighter data will be populated here -->
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div id="no-fighters-message" class="text-center py-12 text-gray-400 hidden">
+                    <i class="fas fa-user-slash text-4xl mb-4"></i>
+                    <p class="text-xl">No fighters found matching your criteria</p>
+                </div>
             </div>
-          )}
+            
+            <!-- PC Rankings Tab -->
+            <div id="pc-tab" class="tab-panel hidden">
+                <div class="platform-rankings-container flex flex-col md:flex-row gap-4 md:gap-8">
+                    <div class="md:w-2/3">
+                        <h2 class="text-xl sm:text-2xl md:text-3xl font-bold mb-4 md:mb-6 header-font neon-blue flex items-center">
+                            <i class="fab fa-windows mr-2 sm:mr-3"></i>UFL PC Rankings
+                        </h2>
+                        
+                        <div class="mb-4 md:mb-6">
+                            <div class="flex items-center justify-between mb-2">
+                                <h3 class="text-base sm:text-lg font-semibold text-blue-300">Top 15 PC Fighters</h3>
+                                <span class="text-xs text-blue-400" id="${platform.toLowerCase()}-updated-time">Updated: Just now</span>
+                            </div>
+                            
+                            <div class="space-y-2 sm:space-y-3" id="pc-rankings-list">
+                                <!-- PC rankings will be populated here -->
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="md:w-1/3">
+                        <div class="frosted-glass border border-blue-500/30 rounded-xl p-4 sm:p-6 sticky top-4">
+                            <h3 class="text-xl font-bold mb-4 header-font neon-blue flex items-center">
+                                <i class="fas fa-crown mr-2"></i>PC Champion
+                            </h3>
+                            <div id="pc-champion-card" class="fighter-card pc-champion champion-card rounded-xl p-4 sm:p-6 md:p-8 text-center relative">
+                                <!-- Champion card will be populated here -->
+                                <div class="text-center py-12 text-gray-400 relative z-10">
+                                    <i class="fas fa-user-slash text-4xl mb-4"></i>
+                                    <p class="text-lg">No current champion</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- PS5 Rankings Tab -->
+            <div id="ps5-tab" class="tab-panel hidden">
+                <div class="platform-rankings-container flex flex-col md:flex-row gap-8">
+                    <div class="md:w-2/3">
+                        <h2 class="text-2xl md:text-3xl font-bold mb-6 header-font neon-blue flex items-center">
+                            <i class="fab fa-playstation mr-3"></i>UFL PS5 Rankings
+                        </h2>
+                        
+                        <div class="mb-6">
+                            <div class="flex items-center justify-between mb-2">
+                                <h3 class="text-lg font-semibold text-blue-300">Top 15 PS5 Fighters</h3>
+                                <span class="text-xs text-blue-400">Updated: Just now</span>
+                            </div>
+                            
+                            <div class="space-y-3" id="ps5-rankings-list">
+                                <!-- PS5 rankings will be populated here -->
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="md:w-1/3">
+                        <div class="frosted-glass border border-blue-500/30 rounded-xl p-6 sticky top-4">
+                            <h3 class="text-xl font-bold mb-4 header-font neon-blue flex items-center">
+                                <i class="fas fa-crown mr-2"></i>PS5 Champion
+                            </h3>
+                            <div id="ps5-champion-card" class="fighter-card ps5-champion rounded-lg p-6 text-center relative">
+                                <!-- Champion card will be populated here -->
+                                <div class="text-center py-12 text-gray-400">
+                                    <i class="fas fa-user-slash text-4xl mb-4"></i>
+                                    <p class="text-lg">No current champion</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Xbox Rankings Tab -->
+            <div id="xbox-tab" class="tab-panel hidden">
+                <div class="platform-rankings-container flex flex-col md:flex-row gap-8">
+                    <div class="md:w-2/3">
+                        <h2 class="text-2xl md:text-3xl font-bold mb-6 header-font neon-blue flex items-center">
+                            <i class="fab fa-xbox mr-3"></i>UFL XBOX Rankings
+                        </h2>
+                        
+                        <div class="mb-6">
+                            <div class="flex items-center justify-between mb-2">
+                                <h3 class="text-lg font-semibold text-blue-300">Top 15 XBOX Fighters</h3>
+                                <span class="text-xs text-blue-400">Updated: Just now</span>
+                            </div>
+                            
+                            <div class="space-y-3" id="xbox-rankings-list">
+                                <!-- Xbox rankings will be populated here -->
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="md:w-1/3">
+                        <div class="frosted-glass border border-blue-500/30 rounded-xl p-6 sticky top-4">
+                            <h3 class="text-xl font-bold mb-4 header-font neon-blue flex items-center">
+                                <i class="fas fa-crown mr-2"></i>XBOX Champion
+                            </h3>
+                            <div id="xbox-champion-card" class="fighter-card xbox-champion rounded-lg p-6 text-center relative">
+                                <!-- Champion card will be populated here -->
+                                <div class="text-center py-12 text-gray-400">
+                                    <i class="fas fa-user-slash text-4xl mb-4"></i>
+                                    <p class="text-lg">No current champion</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Fights Tab -->
+            <div id="fights-tab" class="tab-panel hidden">
+                <h2 class="text-2xl md:text-3xl font-bold mb-6 header-font neon-purple flex items-center">
+                    <i class="fas fa-fist-raised mr-3"></i>Fight History
+                </h2>
+                
+                <div class="mb-6 flex flex-wrap gap-4">
+                    <div class="relative flex-grow max-w-md">
+                        <input type="text" id="fight-search" placeholder="Search fights..." 
+                            class="w-full bg-gray-900/50 border border-purple-500/50 rounded-lg py-2 px-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                        <i class="fas fa-search absolute right-3 top-3 text-purple-400"></i>
+                    </div>
+                    <select id="fight-platform-filter" class="bg-gray-900/50 border border-purple-500/50 rounded-lg py-2 px-4 text-white">
+                        <option value="all">All Platforms</option>
+                        <option value="PC">PC</option>
+                        <option value="PS5">PS5</option>
+                        <option value="XBOX">XBOX</option>
+                    </select>
+                    <select id="fight-result-filter" class="bg-gray-900/50 border border-purple-500/50 rounded-lg py-2 px-4 text-white">
+                        <option value="all">All Results</option>
+                        <option value="KO">KO Wins</option>
+                        <option value="Decision">Decisions</option>
+                        <option value="Draw">Draws</option>
+                    </select>
+                </div>
+                
+                <!-- Pagination for fights -->
+                <div id="fights-pagination" class="pagination mb-4"></div>
+                
+                <div class="overflow-x-auto">
+                    <table class="w-full border-collapse">
+                        <thead>
+                            <tr class="border-b border-purple-500/30">
+                                <th class="py-3 px-4 text-left font-bold text-purple-400">Date</th>
+                                <th class="py-3 px-4 text-left font-bold text-purple-400">Fighters</th>
+                                <th class="py-3 px-4 text-left font-bold text-purple-400">Platform</th>
+                                <th class="py-3 px-4 text-left font-bold text-purple-400">Result</th>
+                                <th class="py-3 px-4 text-left font-bold text-purple-400">Method</th>
+                            </tr>
+                        </thead>
+                        <tbody id="fights-table-body">
+                            <!-- Fight data will be populated here -->
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div id="no-fights-message" class="text-center py-12 text-gray-400 hidden">
+                    <i class="fas fa-fist-raised text-4xl mb-4"></i>
+                    <p class="text-xl">No fights found matching your criteria</p>
+                </div>
+            </div>
+            
+            <!-- Admin Tab -->
+            <div id="admin-tab" class="tab-panel hidden">
+                <h2 class="text-2xl md:text-3xl font-bold mb-6 header-font neon-red flex items-center">
+                    <i class="fas fa-lock mr-3"></i>Admin Dashboard
+                </h2>
+                
+                <!-- Login Section (shown by default) -->
+                <div id="admin-login-section" class="frosted-glass border border-red-500/30 rounded-xl p-6 max-w-md mx-auto">
+                    <h3 class="text-xl font-bold mb-4 header-font neon-red">Admin Login</h3>
+                    <div class="mb-4">
+                        <label for="admin-password" class="block text-sm font-medium text-red-300 mb-1">Password</label>
+                        <input type="password" id="admin-password" 
+                            class="w-full bg-gray-900/50 border border-red-500/50 rounded-lg py-2 px-4 text-white focus:border-red-500 focus:ring-1 focus:ring-red-500">
+                    </div>
+                    <button onclick="adminLogin()" class="w-full bg-red-900/50 hover:bg-red-900/70 border border-red-500 text-white py-2 px-4 rounded-lg font-medium transition-all glow-red">
+                        <i class="fas fa-sign-in-alt mr-2"></i>Login
+                    </button>
+                    <p id="login-error" class="text-red-400 text-sm mt-2 hidden"><i class="fas fa-exclamation-circle mr-1"></i>Incorrect password</p>
+                </div>
+                
+                <!-- Admin Controls (hidden until login) -->
+                <div id="admin-controls" class="hidden">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                        <!-- Add Fighter -->
+                        <div class="frosted-glass border border-purple-500/30 rounded-xl p-6">
+                            <h3 class="text-xl font-bold mb-4 header-font neon-purple flex items-center">
+                                <i class="fas fa-user-plus mr-2"></i>Add Fighter
+                            </h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label for="new-fighter-name" class="block text-sm font-medium text-purple-300 mb-1">Name</label>
+                                    <input type="text" id="new-fighter-name" 
+                                        class="w-full bg-gray-900/50 border border-purple-500/50 rounded-lg py-2 px-4 text-white">
+                                </div>
+                                <div>
+                                    <label for="new-fighter-platform" class="block text-sm font-medium text-purple-300 mb-1">Platform</label>
+                                    <select id="new-fighter-platform" class="w-full bg-gray-900/50 border border-purple-500/50 rounded-lg py-2 px-4 text-white">
+                                        <option value="" disabled selected>Select Platform</option>
+                                        <option value="PC">PC</option>
+                                        <option value="PS5">PS5</option>
+                                        <option value="XBOX">XBOX</option>
+                                    </select>
+                                </div>
+                                <button onclick="addFighter()" class="w-full bg-purple-900/50 hover:bg-purple-900/70 border border-purple-500 text-white py-2 px-4 rounded-lg font-medium transition-all glow-purple">
+                                    <i class="fas fa-save mr-2"></i>Add Fighter
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <!-- Record Fight -->
+                        <div class="frosted-glass border border-blue-500/30 rounded-xl p-6">
+                            <h3 class="text-xl font-bold mb-4 header-font neon-blue flex items-center">
+                                <i class="fas fa-fist-raised mr-2"></i>Record Fight
+                            </h3>
+                            <div class="space-y-4">
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label for="fight-fighter1" class="block text-sm font-medium text-blue-300 mb-1">Fighter 1</label>
+                                        <select id="fight-fighter1" class="w-full bg-gray-900/50 border border-blue-500/50 rounded-lg py-2 px-4 text-white">
+                                            <!-- Fighters will be populated here -->
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label for="fight-fighter2" class="block text-sm font-medium text-blue-300 mb-1">Fighter 2</label>
+                                        <select id="fight-fighter2" class="w-full bg-gray-900/50 border border-blue-500/50 rounded-lg py-2 px-4 text-white">
+                                            <!-- Fighters will be populated here -->
+                                        </select>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label for="fight-platform" class="block text-sm font-medium text-blue-300 mb-1">Platform</label>
+                                    <select id="fight-platform" class="w-full bg-gray-900/50 border border-blue-500/50 rounded-lg py-2 px-4 text-white">
+                                        <option value="" disabled selected>Select Platform</option>
+                                        <option value="PC">PC</option>
+                                        <option value="PS5">PS5</option>
+                                        <option value="XBOX">XBOX</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="fight-result" class="block text-sm font-medium text-blue-300 mb-1">Result</label>
+                                    <select id="fight-result" class="w-full bg-gray-900/50 border border-blue-500/50 rounded-lg py-2 px-4 text-white">
+                                        <option value="" disabled selected>Select Result</option>
+                                        <option value="KO">KO/TKO</option>
+                                        <option value="Decision">Decision</option>
+                                        <option value="Draw">Draw</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="fight-winner" class="block text-sm font-medium text-blue-300 mb-1">Winner</label>
+                                    <select id="fight-winner" class="w-full bg-gray-900/50 border border-blue-500/50 rounded-lg py-2 px-4 text-white">
+                                        <option value="0" disabled>Select winner or choose Draw</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="fight-date" class="block text-sm font-medium text-blue-300 mb-1">Date</label>
+                                    <input type="date" id="fight-date" class="w-full bg-gray-900/50 border border-blue-500/50 rounded-lg py-2 px-4 text-white">
+                                </div>
+                                <button onclick="recordFight()" class="w-full bg-blue-900/50 hover:bg-blue-900/70 border border-blue-500 text-white py-2 px-4 rounded-lg font-medium transition-all glow-blue">
+                                    <i class="fas fa-save mr-2"></i>Record Fight
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Manage Fighters -->
+                    <div class="frosted-glass border border-red-500/30 rounded-xl p-6 mb-8">
+                        <h3 class="text-xl font-bold mb-4 header-font neon-red flex items-center">
+                            <i class="fas fa-user-edit mr-2"></i>Manage Fighters
+                        </h3>
+                        <div class="mb-4">
+                            <label for="edit-fighter-select" class="block text-sm font-medium text-red-300 mb-1">Select Fighter</label>
+                            <select id="edit-fighter-select" onchange="loadFighterData()" class="w-full bg-gray-900/50 border border-red-500/50 rounded-lg py-2 px-4 text-white">
+                                <!-- Fighters will be populated here -->
+                            </select>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
+                            <div>
+                                <label for="edit-fighter-name" class="block text-sm font-medium text-red-300 mb-1">Name</label>
+                                <input type="text" id="edit-fighter-name" class="w-full bg-gray-900/50 border border-red-500/50 rounded-lg py-2 px-4 text-white">
+                            </div>
+                            <div>
+                                <label for="edit-fighter-platform" class="block text-sm font-medium text-red-300 mb-1">Platform</label>
+                                <select id="edit-fighter-platform" class="w-full bg-gray-900/50 border border-red-500/50 rounded-lg py-2 px-4 text-white">
+                                    <option value="PC">PC</option>
+                                    <option value="PS5">PS5</option>
+                                    <option value="XBOX">XBOX</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="flex flex-wrap gap-4">
+                            <button onclick="updateFighter()" class="flex-1 bg-red-900/50 hover:bg-red-900/70 border border-red-500 text-white py-2 px-4 rounded-lg font-medium transition-all glow-red">
+                                <i class="fas fa-save mr-2"></i>Update Fighter
+                            </button>
+                            <button onclick="confirmDeleteFighter()" class="flex-1 bg-red-900/50 hover:bg-red-900/70 border border-red-500 text-white py-2 px-4 rounded-lg font-medium transition-all glow-red">
+                                <i class="fas fa-trash mr-2"></i>Delete Fighter
+                            </button>
+                            <button onclick="confirmRetireFighter()" class="flex-1 bg-gray-900/50 hover:bg-gray-900/70 border border-gray-500 text-white py-2 px-4 rounded-lg font-medium transition-all glow-gray">
+                                <i class="fas fa-user-slash mr-2"></i>Retire/Unretire Fighter
+                            </button>
+                            <button onclick="toggleChampionStatus()" id="champion-toggle-btn" class="flex-1 bg-yellow-900/50 hover:bg-yellow-900/70 border border-yellow-500 text-white py-2 px-4 rounded-lg font-medium transition-all glow-yellow">
+                                <i class="fas fa-crown mr-2"></i>Make Champion
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Manage Fights -->
+                    <div class="frosted-glass border border-purple-500/30 rounded-xl p-6 mb-8">
+                        <h3 class="text-xl font-bold mb-4 header-font neon-purple flex items-center">
+                            <i class="fas fa-list mr-2"></i>Manage Fights
+                        </h3>
+                        <div class="mb-4">
+                            <label for="delete-fight-select" class="block text-sm font-medium text-purple-300 mb-1">Select Fight to Delete</label>
+                            <select id="delete-fight-select" class="w-full bg-gray-900/50 border border-purple-500/50 rounded-lg py-2 px-4 text-white">
+                                <!-- Fights will be populated here -->
+                            </select>
+                        </div>
+                        <button onclick="confirmDeleteFight()" class="w-full bg-purple-900/50 hover:bg-purple-900/70 border border-purple-500 text-white py-2 px-4 rounded-lg font-medium transition-all glow-purple">
+                            <i class="fas fa-trash mr-2"></i>Delete Selected Fight
+                        </button>
+                    </div>
 
-{tab === 'UFL PC' && (
-  <>
-    <h2 className="text-2xl font-bold mb-4">👑 Champion</h2>
-    {fighters
-      .filter(f => f.platform === 'UFL PC' && f.champion)
-      .map(f => (
-        <div key={f.name} className="bg-gray-800 text-white p-4 rounded mb-4">
-          <p className="text-xl font-bold">{f.name}</p>
-          <p>W: {f.wins} | L: {f.losses} | D: {f.draws} | KO: {f.koWins}</p>
+                    <!-- Ranking System Guide -->
+                    <div class="frosted-glass border border-blue-500/30 rounded-xl p-6">
+                        <h3 class="text-xl font-bold mb-4 header-font neon-blue flex items-center">
+                            <i class="fas fa-info-circle mr-2"></i>Ranking System Guide
+                        </h3>
+                        <div class="prose prose-invert max-w-none">
+                            <h4 class="text-lg font-semibold text-blue-300">How Rankings Are Calculated</h4>
+                            <p>Fighters earn ranking points based on:</p>
+                            <ul class="list-disc pl-5 space-y-1">
+                                <li><strong>Base Record Points</strong>: Wins (3 pts), Losses (-1 pt), Draws (1 pt)</li>
+                                <li><strong>Opponent Quality Bonus</strong>:
+                                    <ul class="list-disc pl-5">
+                                        <li>+2 x opponent's win % for wins</li>
+                                        <li>-0.5 x (1 - opponent's win %) for losses</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Recent Form Bonus</strong>:
+                                    <ul class="list-disc pl-5">
+                                        <li>+1 pt for each win in last 5 fights</li>
+                                        <li>+0.3 pts for each draw in last 5 fights</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Recent Fight Multiplier</strong>: Fights within last 20 days get 1.5x weight</li>
+                            </ul>
+
+                            <h4 class="text-lg font-semibold text-blue-300 mt-4">Ranking Tiebreakers</h4>
+                            <ol class="list-decimal pl-5 space-y-1">
+                                <li>Total ranking points</li>
+                                <li>Head-to-head record against tied fighter</li>
+                                <li>Total wins</li>
+                            </ol>
+
+                            <h4 class="text-lg font-semibold text-blue-300 mt-4">Championship Rules</h4>
+                            <ul class="list-disc pl-5 space-y-1">
+                                <li>Champions are excluded from rankings</li>
+                                <li>Only one champion per platform</li>
+                                <li>Champions must defend title regularly</li>
+                            </ul>
+
+                            <h4 class="text-lg font-semibold text-blue-300 mt-4">Ranking Updates</h4>
+                            <ul class="list-disc pl-5 space-y-1">
+                                <li>Rankings recalculate automatically after each fight</li>
+                                <li>Full recalculation every 30 seconds</li>
+                                <li>Recent fights (last 20 days) count more</li>
+                            </ul>
+
+                            <h4 class="text-lg font-semibold text-blue-300 mt-4">Streak System</h4>
+                            <ul class="list-disc pl-5 space-y-1">
+                                <li><strong>Hot Streak</strong>: Fighter has at least 1 win and twice as many wins as losses</li>
+                                <li><strong>Cold Streak</strong>: Fighter has at least 1 loss and twice as many losses as wins</li>
+                                <li><strong>Neutral</strong>: Fighter doesn't meet Hot or Cold streak criteria</li>
+                                <li>Retired fighters display a "Retired" badge instead of streak status</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
-      ))}
-
-    <h2 className="text-2xl font-bold mb-2">Top 15 Contenders</h2>
-    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-{getSortedFighters('UFL PC')
-  .filter(f => !f.champion)
-  .slice(0, 15)
-        .map((f, index) => (
-          <div key={f.name} className="bg-gray-800 text-white p-4 rounded">
-            <div className="flex justify-between mb-2">
-              <h3 className="text-lg font-semibold">{f.name}</h3>
-              <span className="text-sm text-gray-300">#{index + 1}</span>
-            </div>
-            {(() => {
-  const stats = getFighterStats(f.name);
-  return (
-    <>
-      <p>W: {stats.wins} | L: {stats.losses} | D: {stats.draws}</p>
-      <p>KO Wins: {stats.koWins}</p>
-    </>
-  );
-})()}
-          </div>
-        ))}
     </div>
-  </>
-)}
-
-{tab === 'UFL PS5' && (
-  <>
-    <h2 className="text-2xl font-bold mb-4">👑 Champion</h2>
-    {fighters
-      .filter(f => f.platform === 'UFL PS5' && f.champion)
-      .map(f => (
-        <div key={f.name} className="bg-gray-800 text-white p-4 rounded mb-4">
-          <p className="text-xl font-bold">{f.name}</p>
-          <p>W: {f.wins} | L: {f.losses} | D: {f.draws} | KO: {f.koWins}</p>
-        </div>
-      ))}
-
-    <h2 className="text-2xl font-bold mb-2">Top 15 Contenders</h2>
-    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-    {getSortedFighters('UFL PS5')
-  .filter(f => !f.champion)
-  .slice(0, 15)
-        .map((f, index) => (
-          <div key={f.name} className="bg-gray-800 text-white p-4 rounded">
-            <div className="flex justify-between mb-2">
-              <h3 className="text-lg font-semibold">{f.name}</h3>
-              <span className="text-sm text-gray-300">#{index + 1}</span>
+    
+    <!-- Ranking Details Modal -->
+    <div id="ranking-details-modal" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 hidden">
+        <div class="frosted-glass border border-blue-500/50 rounded-xl p-6 max-w-md w-full mx-4 animate-pop-in">
+            <h3 id="ranking-fighter-name" class="text-xl font-bold mb-2 header-font neon-blue"></h3>
+            <div id="ranking-details-content" class="mb-4 text-sm"></div>
+            <div class="flex justify-end">
+                <button onclick="closeRankingModal()" class="bg-blue-900/70 hover:bg-blue-900/90 border border-blue-500 text-white py-2 px-4 rounded-lg font-medium transition-all glow-blue">
+                    Close
+                </button>
             </div>
-            {(() => {
-  const stats = getFighterStats(f.name);
-  return (
-    <>
-      <p>W: {stats.wins} | L: {stats.losses} | D: {stats.draws}</p>
-      <p>KO Wins: {stats.koWins}</p>
-    </>
-  );
-})()}
-          </div>
-        ))}
-    </div>
-  </>
-)}
-
-{tab === 'UFL XBOX' && (
-  <>
-    <h2 className="text-2xl font-bold mb-4">👑 Champion</h2>
-    {fighters
-      .filter(f => f.platform === 'UFL XBOX' && f.champion)
-      .map(f => (
-        <div key={f.name} className="bg-gray-800 text-white p-4 rounded mb-4">
-          <p className="text-xl font-bold">{f.name}</p>
-          <p>W: {f.wins} | L: {f.losses} | D: {f.draws} | KO: {f.koWins}</p>
         </div>
-      ))}
+    </div>
 
-    <h2 className="text-2xl font-bold mb-2">Top 15 Contenders</h2>
-    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-    {getSortedFighters('UFL XBOX')
-  .filter(f => !f.champion)
-  .slice(0, 15)
-        .map((f, index) => (
-          <div key={f.name} className="bg-gray-800 text-white p-4 rounded">
-            <div className="flex justify-between mb-2">
-              <h3 className="text-lg font-semibold">{f.name}</h3>
-              <span className="text-sm text-gray-300">#{index + 1}</span>
+    <!-- Confirmation Modal -->
+    <div id="confirmation-modal" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 hidden">
+        <div class="frosted-glass border border-red-500/50 rounded-xl p-6 max-w-md w-full mx-4 animate-pop-in">
+            <h3 id="modal-title" class="text-xl font-bold mb-4 header-font neon-red"></h3>
+            <p id="modal-message" class="mb-6"></p>
+            <div class="flex justify-end gap-4">
+                <button onclick="closeModal()" class="bg-gray-700 hover:bg-gray-600 border border-gray-500 text-white py-2 px-4 rounded-lg font-medium transition-all">
+                    Cancel
+                </button>
+                <button onclick="confirmAction()" id="confirm-action-btn" class="bg-red-900/70 hover:bg-red-900/90 border border-red-500 text-white py-2 px-4 rounded-lg font-medium transition-all glow-red">
+                    Confirm
+                </button>
             </div>
-            {(() => {
-  const stats = getFighterStats(f.name);
-  return (
-    <>
-      <p>W: {stats.wins} | L: {stats.losses} | D: {stats.draws}</p>
-      <p>KO Wins: {stats.koWins}</p>
-    </>
-  );
-})()}
-          </div>
-        ))}
+        </div>
     </div>
-  </>
-)}
+    
+    <script>
+        // Alert notification function
+        function showAlert(type, message) {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `fixed top-4 right-4 px-6 py-4 rounded-lg shadow-lg z-50 animate-slide-down ${type === 'success' ? 'bg-green-600' : 'bg-red-600'} text-white`;
+            alertDiv.innerHTML = `
+                <div class="flex items-center">
+                    <i class="fas ${type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'} mr-2"></i>
+                    ${message}
+                </div>
+            `;
+            document.body.appendChild(alertDiv);
+            
+            // Auto remove after 3 seconds
+            setTimeout(() => {
+                alertDiv.classList.add('animate-fade-out');
+                setTimeout(() => alertDiv.remove(), 500);
+            }, 3000);
+        }
 
-{tab === 'Admin' && (
-  <div className="p-4">
-    {!adminMode ? (
-      <div className="max-w-sm mx-auto bg-gray-900 p-6 rounded-xl shadow space-y-4 text-center">
-        <h2 className="text-2xl font-bold text-white">Admin Login</h2>
-        <input
-          type="password"
-          placeholder="Enter admin password"
-          className="bg-gray-800 text-white px-4 py-2 rounded w-full"
-          value={passwordInput}
-          onChange={e => setPasswordInput(e.target.value)}
-        />
-        <button
-          onClick={handlePasswordSubmit}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded w-full"
-        >
-          Login
-        </button>
-      </div>
-    ) : (
-      <div className="space-y-8">
+        // Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyCpUf-i1CZU0rzcI7XJNKv4YUMClpAyu6c",
+  authDomain: "ufl-mma.firebaseapp.com",
+  projectId: "ufl-mma",
+  storageBucket: "ufl-mma.firebasestorage.app",
+  messagingSenderId: "973465763695",
+  appId: "1:973465763695:web:cef98846eea8d2b198f29a",
+  measurementId: "G-XT3EC0MSVR"
+};
 
-        {/* ➕ Add Fighter */}
-        <div>
-          <h2 className="text-xl font-bold mb-2">➕ Add Fighter</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            <input
-              type="text"
-              placeholder="Fighter name"
-              value={newFighter.name}
-              onChange={e => setNewFighter(prev => ({ ...prev, name: e.target.value }))}
-              className="bg-gray-800 text-white px-2 py-1 rounded"
-            />
-            <select
-              value={newFighter.platform}
-              onChange={e => setNewFighter(prev => ({ ...prev, platform: e.target.value as Platform }))}
-              className="bg-gray-800 text-white px-2 py-1 rounded"
-            >
-              {platforms.map(p => (
-                <option key={p} value={p}>{p}</option>
-              ))}
-            </select>
-          </div>
-          <button
-            onClick={handleAddFighter}
-            className="mt-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
-          >
-            Add Fighter
-          </button>
-        </div>
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
 
-        {/* 👑 Select Champion */}
-        <div>
-          <h2 className="text-xl font-bold mb-2">👑 Select Champion</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-            {platforms.map(p => (
-              <div key={p}>
-                <label className="text-white block mb-1">{p} Champion:</label>
-                <select
-                  value={fighters.find(f => f.platform === p && f.champion)?.name || ''}
-                  onChange={async e => {
-                    const selectedName = e.target.value;
-                    const platformFighters = fighters.filter(f => f.platform === p);
-                    for (const f of platformFighters) {
-                      await updateDoc(doc(db, 'fighters', f.firebaseId), {
-                        ...f,
-                        champion: f.name === selectedName,
-                      });
+        // Data variables
+        let fighters = [];
+        let fights = [];
+        
+        // Pagination variables
+        const ITEMS_PER_PAGE = 50;
+        let currentFightersPage = 1;
+        let currentFightsPage = 1;
+        let filteredFighters = [];
+        let filteredFights = [];
+        
+        // Admin state
+        let isAdmin = false;
+        const ADMIN_PASSWORD = 'G36DSFGB3873GFDIY38HS9I34G';
+        
+        // Modal state
+        let currentAction = null;
+        let currentActionData = null;
+        
+        // Initialize the app
+        document.addEventListener('DOMContentLoaded', async function() {
+            initTabs();
+            
+            // Load data from Firestore
+            await loadAllData();
+            
+            // Set default date for fight recording to today (local time)
+            const today = new Date();
+            const localDate = new Date(today.getTime() - today.getTimezoneOffset() * 60000).toISOString().split('T')[0];
+            document.getElementById('fight-date').value = localDate;
+            
+            // Load initial data
+            renderFightersTable();
+            renderPlatformRankings();
+            renderFightsTable();
+            populateFighterSelects();
+            
+            // Set up event listeners
+            document.getElementById('fighter-search').addEventListener('input', renderFightersTable);
+            document.getElementById('platform-filter').addEventListener('change', renderFightersTable);
+            document.getElementById('fight-search').addEventListener('input', renderFightsTable);
+            document.getElementById('fight-platform-filter').addEventListener('change', renderFightsTable);
+            document.getElementById('fight-result-filter').addEventListener('change', renderFightsTable);
+            
+            // Set records tab as active by default
+            switchTab('records');
+        });
+        
+        // Tab switching
+        // Cache tab elements and order
+        const tabOrder = ['records','pc','ps5','xbox','fights','admin'];
+        let currentTab = null;
+        let tabs = {};
+
+        function initTabs() {
+            tabOrder.forEach(tab => {
+                tabs[tab] = document.getElementById(`${tab}-tab`);
+            });
+            currentTab = tabs.records;
+        }
+
+        function switchTab(tabName) {
+            // Don't allow rapid switching while animation is in progress
+            if (currentTab.classList.contains('animating')) return;
+
+            const newTab = tabs[tabName];
+            
+            // If already on this tab, do nothing
+            if (currentTab === newTab) return;
+
+            // Change background based on tab
+            document.body.className = 'min-h-screen ' + 
+                (tabName === 'pc' ? 'pc-bg' : 
+                 tabName === 'ps5' ? 'ps5-bg' : 
+                 tabName === 'xbox' ? 'xbox-bg' : 'default-bg');
+
+            // Mark current tab as animating
+            currentTab.classList.add('animating');
+            newTab.classList.add('animating');
+
+            // Determine animation direction
+            const currentIndex = tabOrder.indexOf(currentTab.id.replace('-tab',''));
+            const newIndex = tabOrder.indexOf(tabName);
+            const direction = newIndex > currentIndex ? 'left' : 'right';
+
+            // Hide current tab
+            currentTab.classList.add('hidden');
+            currentTab.classList.remove('animating');
+
+            // Show new tab with animation
+            newTab.classList.remove('hidden');
+            newTab.style.animation = `slideIn${direction.charAt(0).toUpperCase() + direction.slice(1)} 0.3s ease-out forwards`;
+            
+            // Clean up after animation
+            setTimeout(() => {
+                newTab.style.animation = '';
+                newTab.classList.remove('animating');
+            }, 300);
+
+            currentTab = newTab;
+            
+            // Update active tab button
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('tab-active');
+            });
+            
+            document.querySelector(`.tab-btn[data-tab="${tabName}"]`).classList.add('tab-active');
+            
+            // Refresh data if needed
+            if (tabName === 'records') {
+                renderFightersTable();
+            } else if (tabName === 'fights') {
+                renderFightsTable();
+            } else if (['pc', 'ps5', 'xbox'].includes(tabName)) {
+                renderPlatformRankings();
+            }
+        }
+        
+        // Render fighters table with filtering and pagination
+        function renderFightersTable() {
+            const searchTerm = document.getElementById('fighter-search').value.toLowerCase();
+            const platformFilter = document.getElementById('platform-filter').value;
+            
+            // Apply filters
+            filteredFighters = fighters.filter(fighter => {
+                const matchesSearch = !searchTerm || fighter.name.toLowerCase().includes(searchTerm);
+                const matchesPlatform = platformFilter === 'all' || fighter.platform === platformFilter;
+                return matchesSearch && matchesPlatform;
+            });
+            
+            // Sort by wins descending
+            filteredFighters.sort((a, b) => b.wins - a.wins);
+            
+            // Pagination
+            const totalPages = Math.ceil(filteredFighters.length / ITEMS_PER_PAGE);
+            const startIndex = (currentFightersPage - 1) * ITEMS_PER_PAGE;
+            const endIndex = startIndex + ITEMS_PER_PAGE;
+            const paginatedFighters = filteredFighters.slice(startIndex, endIndex);
+            
+            const tableBody = document.getElementById('fighters-table-body');
+            tableBody.innerHTML = '';
+            
+            if (paginatedFighters.length === 0) {
+                document.getElementById('no-fighters-message').classList.remove('hidden');
+                document.getElementById('fighters-pagination').innerHTML = '';
+                return;
+            } else {
+                document.getElementById('no-fighters-message').classList.add('hidden');
+            }
+            
+            paginatedFighters.forEach((fighter, index) => {
+                const row = document.createElement('tr');
+                row.className = 'border-b border-purple-500/10 hover:bg-purple-900/10 transition-all transform hover:scale-[1.005] animate-fade-in';
+                row.style.animationDelay = `${index * 0.05}s`;
+                
+                row.innerHTML = `
+                    <td class="py-3 px-4 font-medium">${fighter.name} ${fighter.champion ? '<span class="text-yellow-400 ml-2"><i class="fas fa-crown"></i></span>' : ''} ${fighter.retired ? '<span class="text-gray-400 ml-2"><i class="fas fa-user-slash"></i></span>' : ''}</td>
+                    <td class="py-3 px-4">
+                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${fighter.platform === 'PC' ? 'bg-gray-900/50 text-gray-300 border border-gray-500' : fighter.platform === 'PS5' ? 'bg-gray-900/50 text-gray-300 border border-gray-500' : 'bg-gray-900/50 text-gray-300 border border-gray-500'}">
+                            ${fighter.platform}
+                        </span>
+                    </td>
+                    <td class="py-3 px-4">${fighter.wins}-${fighter.losses}-${fighter.draws}</td>
+                    <td class="py-3 px-4">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-900/50 text-gold border border-gold">
+                            ${fighter.koWins} <i class="fas fa-bolt ml-1"></i>
+                        </span>
+                    </td>
+                    <td class="py-3 px-4">
+                        ${fighter.retired ? 
+                          '<span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-900/50 text-gray-300 border border-gray-600"><i class="fas fa-user-slash mr-1"></i> Retired</span>' : 
+                          fighter.wins > 0 && fighter.wins >= fighter.losses * 2 ? 
+                          '<span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-900/30 text-green-300 border border-green-500 animate-pulse"><i class="fas fa-fire mr-1"></i> Hot Streak</span>' : 
+                          fighter.losses > 0 && fighter.losses >= fighter.wins * 2 ? 
+                          '<span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-900/30 text-red-300 border border-red-500"><i class="fas fa-snowflake mr-1"></i> Cold Streak</span>' : 
+                          '<span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-900/30 text-gray-300 border border-gray-500"><i class="fas fa-equals mr-1"></i> Neutral</span>'}
+                    </td>
+                `;
+                
+                tableBody.appendChild(row);
+            });
+        }
+        
+        
+        // Render platform rankings
+        function renderPlatformRankings() {
+            // Format current time
+            const now = new Date();
+            const timeString = now.toLocaleTimeString([], { hour: '2-digit', minute:'2-digit' });
+            
+            // Update all platform timestamps
+            ['pc', 'ps5', 'xbox'].forEach(platform => {
+                const element = document.getElementById(`${platform}-updated-time`);
+                if (element) {
+                    element.textContent = `Updated: ${timeString}`;
+                }
+            });
+
+            renderPlatformRanking('PC');
+            renderPlatformRanking('PS5');
+            renderPlatformRanking('XBOX');
+            
+            // Update champion cards
+            updateChampionCard('PC');
+            updateChampionCard('PS5');
+            updateChampionCard('XBOX');
+        }
+        
+        // Helper function to check if a fight is recent (within 20 days)
+        function isRecentFight(fightDate) {
+            const twentyDaysAgo = new Date();
+            twentyDaysAgo.setDate(twentyDaysAgo.getDate() - 20);
+            return new Date(fightDate) > twentyDaysAgo;
+        }
+
+        // Calculate ranking points for a fighter
+        function calculateRankingPoints(fighter, platform) {
+            // Base points from record (wins are worth more than losses subtract)
+            const recordPoints = (fighter.wins * 3) - (fighter.losses * 1) + (fighter.draws * 1);
+            
+            // Quality of opponents bonus
+            let opponentQualityBonus = 0;
+            const fighterFights = fights.filter(fight => 
+                (fight.fighter1 === fighter.id || fight.fighter2 === fighter.id) &&
+                fight.platform === platform
+            );
+            
+            fighterFights.forEach(fight => {
+                const opponentId = fight.fighter1 === fighter.id ? fight.fighter2 : fight.fighter1;
+                const opponent = getFighterById(opponentId);
+                if (opponent) {
+                    // Opponent quality is based on their win percentage
+                    const opponentWinPct = opponent.wins + opponent.losses > 0 ? 
+                        opponent.wins / (opponent.wins + opponent.losses) : 0;
+                    
+                    // Apply multiplier for recent fights (within 20 days)
+                    const recentMultiplier = isRecentFight(fight.date) ? 1.5 : 1;
+                    
+                    // Bonus is higher for beating good opponents
+                    if (fight.winner === fighter.id) {
+                        opponentQualityBonus += opponentWinPct * 2 * recentMultiplier;
                     }
-                    await fetchFighters();
-                  }}
-                  className="bg-gray-800 text-white px-2 py-1 rounded w-full"
-                >
-                  <option value="">None</option>
-                  {fighters.filter(f => f.platform === p).map(f => (
-                    <option key={f.firebaseId} value={f.name}>{f.name}</option>
-                  ))}
-                </select>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* 🥊 Add Fight */}
-        <div>
-          <h2 className="text-xl font-bold mb-2">🥊 Add Fight</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            <select
-              value={newFight.fighter1}
-              onChange={e => setNewFight(prev => ({ ...prev, fighter1: e.target.value }))}
-              className="bg-gray-800 text-white px-2 py-1 rounded"
-            >
-              <option value="">Fighter 1</option>
-              {fighters.map(f => (
-                <option key={f.firebaseId} value={f.name}>{f.name}</option>
-              ))}
-            </select>
-            <select
-              value={newFight.fighter2}
-              onChange={e => setNewFight(prev => ({ ...prev, fighter2: e.target.value }))}
-              className="bg-gray-800 text-white px-2 py-1 rounded"
-            >
-              <option value="">Fighter 2</option>
-              {fighters.map(f => (
-                <option key={f.firebaseId} value={f.name}>{f.name}</option>
-              ))}
-            </select>
-            <select
-              value={newFight.winner}
-              onChange={e => setNewFight(prev => ({ ...prev, winner: e.target.value }))}
-              className="bg-gray-800 text-white px-2 py-1 rounded"
-            >
-              <option value="">Winner</option>
-              {[newFight.fighter1, newFight.fighter2, 'Draw'].map(w => (
-                <option key={w} value={w}>{w}</option>
-              ))}
-            </select>
-            <select
-              value={newFight.method}
-              onChange={e => setNewFight(prev => ({ ...prev, method: e.target.value as 'KO' | 'Decision' | 'Draw' }))}
-              className="bg-gray-800 text-white px-2 py-1 rounded"
-            >
-              <option value="Decision">Decision</option>
-              <option value="KO">KO</option>
-              <option value="Draw">Draw</option>
-            </select>
-            <select
-              value={newFight.platform}
-              onChange={e => setNewFight(prev => ({ ...prev, platform: e.target.value as Platform }))}
-              className="bg-gray-800 text-white px-2 py-1 rounded"
-            >
-              {platforms.map(p => (
-                <option key={p} value={p}>{p}</option>
-              ))}
-            </select>
-            <input
-              type="date"
-              value={newFight.date}
-              onChange={e => setNewFight(prev => ({ ...prev, date: e.target.value }))}
-              className="bg-gray-800 text-white px-2 py-1 rounded"
-            />
-          </div>
-          <button
-            onClick={handleAddFight}
-            className="mt-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
-          >
-            Add Fight
-          </button>
-        </div>
-
-        {/* 🧠 Manage Fighters */}
-        <div>
-          <h2 className="text-xl font-bold mb-2">🧠 Manage Fighters</h2>
-          <input
-            type="text"
-            placeholder="Search fighters..."
-            value={searchFighter}
-            onChange={e => setSearchFighter(e.target.value)}
-            className="mb-2 px-3 py-1 rounded bg-gray-800 text-white w-full"
-          />
-          <div className="grid grid-cols-1 gap-2">
-            {fighters
-              .filter(f => f.name.toLowerCase().includes(searchFighter.toLowerCase()))
-              .map(f => (
-                <div key={f.firebaseId} className="bg-gray-800 p-3 rounded shadow-md space-y-2">
-                  <input
-                    type="text"
-                    value={f.name}
-                    onChange={e =>
-                      setFighters(prev =>
-                        prev.map(x =>
-                          x.firebaseId === f.firebaseId ? { ...x, name: e.target.value } : x
-                        )
-                      )
+                    // Small penalty for losing to weak opponents
+                    else if (fight.winner === opponentId) {
+                        opponentQualityBonus -= (1 - opponentWinPct) * 0.5 * recentMultiplier;
                     }
-                    className="bg-gray-700 px-2 py-1 rounded text-white w-full"
-                  />
-                  <select
-                    value={f.platform}
-                    onChange={e =>
-                      setFighters(prev =>
-                        prev.map(x =>
-                          x.firebaseId === f.firebaseId
-                            ? { ...x, platform: e.target.value as Platform }
-                            : x
-                        )
-                      )
-                    }
-                    className="bg-gray-700 text-white px-2 py-1 rounded w-full"
-                  >
-                    {platforms.map(p => (
-                      <option key={p} value={p}>{p}</option>
-                    ))}
-                  </select>
-                  <div className="flex flex-wrap gap-2">
-                    {['wins', 'losses', 'draws', 'koWins'].map(stat => (
-                      <input
-                        key={stat}
-                        type="number"
-                        value={String(f[stat as keyof typeof f] ?? '')}
-                        onChange={e =>
-                          setFighters(prev =>
-                            prev.map(x =>
-                              x.firebaseId === f.firebaseId
-                                ? {
-                                    ...x,
-                                    [stat]: parseInt(e.target.value) || 0,
-                                  }
-                                : x
-                            )
-                          )
+                }
+            });
+            
+            // Recent performance bonus (last 5 fights)
+            const recentFights = fighterFights
+                .sort((a, b) => new Date(b.date) - new Date(a.date))
+                .slice(0, 5);
+            
+            let recentFormBonus = 0;
+            recentFights.forEach(fight => {
+                const recentMultiplier = isRecentFight(fight.date) ? 1.5 : 1;
+                if (fight.winner === fighter.id) recentFormBonus += 1 * recentMultiplier;
+                else if (fight.winner === '0') recentFormBonus += 0.3 * recentMultiplier;
+            });
+            
+            // Total points
+            return recordPoints + opponentQualityBonus + recentFormBonus;
+        }
+
+        function renderPlatformRanking(platform) {
+            // Filter fighters by platform, not retired, not champion, and has at least one fight
+            let platformFighters = fighters.filter(fighter => 
+                fighter.platform === platform && 
+                !fighter.retired &&
+                !fighter.champion &&
+                (fighter.wins > 0 || fighter.losses > 0 || fighter.draws > 0)
+            );
+            
+            // Calculate ranking points for each fighter
+            platformFighters.forEach(fighter => {
+                fighter.rankingPoints = calculateRankingPoints(fighter, platform);
+            });
+            
+            // Sort by ranking points
+            platformFighters.sort((a, b) => {
+                // First by ranking points
+                if (a.rankingPoints > b.rankingPoints) return -1;
+                if (b.rankingPoints > a.rankingPoints) return 1;
+                
+                // If tied, check head-to-head
+                const h2h = getHeadToHeadRecord(a.id, b.id, platform);
+                if (h2h.fighter1Wins > h2h.fighter2Wins) return -1;
+                if (h2h.fighter2Wins > h2h.fighter1Wins) return 1;
+                
+                // If still tied, sort by total wins
+                return b.wins - a.wins;
+            });
+            
+            // Get top 15
+            const top15 = platformFighters.slice(0, 15);
+            
+            // Render the list
+            const listElement = document.getElementById(`${platform.toLowerCase()}-rankings-list`);
+            listElement.innerHTML = '';
+            
+            top15.forEach((fighter, index) => {
+                const item = document.createElement('div');
+                item.className = 'flex items-center justify-between p-3 rounded-lg bg-gray-900/30 border border-blue-500/20 hover:border-blue-500/50 transition-colors';
+                
+                item.innerHTML = `
+                    <div class="flex items-center">
+                        <span class="w-8 text-center font-bold ${index < 3 ? 'text-yellow-400' : 'text-blue-300'}">${index + 1}</span>
+                        <div class="ml-3">
+                            <div class="font-medium"><a href="javascript:void(0)" onclick="showRankingDetails('${fighter.id}', '${platform}')" class="hover:text-blue-300">${fighter.name}</a> ${fighter.champion ? '<span class="text-yellow-400 ml-2"><i class="fas fa-crown"></i></span>' : ''}</div>
+                            <div class="text-xs text-blue-300">${fighter.wins}-${fighter.losses}-${fighter.draws} (${fighter.koWins} KOs)</div>
+                        </div>
+                    </div>
+                `;
+                
+                listElement.appendChild(item);
+            });
+        }
+        
+        function updateChampionCard(platform) {
+            const champion = fighters.find(fighter => 
+                fighter.platform === platform && 
+                fighter.champion &&
+                (fighter.wins > 0 || fighter.losses > 0 || fighter.draws > 0)
+            );
+            const cardElement = document.getElementById(`${platform.toLowerCase()}-champion-card`);
+            
+            if (champion) {
+                cardElement.innerHTML = `
+                    <div class="champion-crown"><i class="fas fa-crown"></i></div>
+                    <div class="relative z-10">
+                        <div class="text-4xl md:text-5xl font-bold mb-2 header-font gold-text" style="text-shadow: 0 0 10px var(--gold);"><a href="javascript:void(0)" onclick="showRankingDetails('${champion.id}', '${platform}')" class="hover:text-yellow-300">${champion.name}</a></div>
+                        <div class="text-xl md:text-2xl font-medium mb-8 ${platform === 'PC' ? 'text-red-300' : platform === 'PS5' ? 'text-blue-300' : 'text-green-300'}" style="text-shadow: 0 0 8px ${platform === 'PC' ? 'rgba(139, 0, 0, 0.7)' : platform === 'PS5' ? 'rgba(0, 105, 148, 0.7)' : 'rgba(14, 122, 13, 0.7)'}">
+                            ${platform} Champion
+                        </div>
+                        <div class="grid grid-cols-4 gap-4 mb-8">
+                            <div class="text-center">
+                                <div class="text-3xl md:text-4xl font-bold gold-text" style="text-shadow: 0 0 8px var(--gold);">${champion.wins}</div>
+                                <div class="text-xs uppercase tracking-wider text-gray-300">Wins</div>
+                            </div>
+                            <div class="text-center">
+                                <div class="text-3xl md:text-4xl font-bold ${platform === 'PC' ? 'text-red-300' : platform === 'PS5' ? 'text-blue-300' : 'text-green-300'}" style="text-shadow: 0 0 8px ${platform === 'PC' ? 'rgba(139, 0, 0, 0.5)' : platform === 'PS5' ? 'rgba(0, 105, 148, 0.5)' : 'rgba(14, 122, 13, 0.5)'}">${champion.losses}</div>
+                                <div class="text-xs uppercase tracking-wider text-gray-300">Losses</div>
+                            </div>
+                            <div class="text-center">
+                                <div class="text-3xl md:text-4xl font-bold ${platform === 'PC' ? 'text-red-300' : platform === 'PS5' ? 'text-blue-300' : 'text-green-300'}" style="text-shadow: 0 0 8px ${platform === 'PC' ? 'rgba(139, 0, 0, 0.5)' : platform === 'PS5' ? 'rgba(0, 105, 148, 0.5)' : 'rgba(14, 122, 13, 0.5)'}">${champion.draws}</div>
+                                <div class="text-xs uppercase tracking-wider text-gray-300">Draws</div>
+                            </div>
+                            <div class="text-center">
+                                <div class="text-3xl md:text-4xl font-bold gold-text" style="text-shadow: 0 0 8px var(--gold);">${champion.koWins}</div>
+                                <div class="text-xs uppercase tracking-wider text-gray-300">KOs</div>
+                            </div>
+                        </div>
+                        <div class="text-sm ${platform === 'PC' ? 'text-red-400' : platform === 'PS5' ? 'text-blue-400' : 'text-green-400'}" style="text-shadow: 0 0 5px ${platform === 'PC' ? 'rgba(139, 0, 0, 0.5)' : platform === 'PS5' ? 'rgba(0, 105, 148, 0.5)' : 'rgba(14, 122, 13, 0.5)'}">
+                            <i class="fas fa-shield-alt mr-2"></i>Last defense: ${getLastFightDate(champion.id, platform)}
+                        </div>
+                    </div>
+                `;
+            } else {
+                cardElement.innerHTML = `
+                    <div class="text-center py-12 text-gray-400">
+                        <i class="fas fa-user-slash text-4xl mb-4"></i>
+                        <p class="text-lg">No current champion</p>
+                    </div>
+                `;
+            }
+        }
+        
+        function getLastFightDate(fighterId, platform) {
+            const fighterFights = fights.filter(fight => 
+                (fight.fighter1 === fighterId || fight.fighter2 === fighterId) && 
+                fight.platform === platform
+            );
+            
+            if (fighterFights.length === 0) return 'N/A';
+            
+            // Sort by date descending
+            fighterFights.sort((a, b) => new Date(b.date) - new Date(a.date));
+            
+            return formatDate(fighterFights[0].date);
+        }
+        
+        // Render fights table with filtering and error handling
+        function renderFightsTable() {
+            console.log('Rendering fights table with', fights.length, 'total fights');
+            
+            const searchTerm = document.getElementById('fight-search').value.toLowerCase();
+            const platformFilter = document.getElementById('fight-platform-filter').value;
+            const resultFilter = document.getElementById('fight-result-filter').value;
+            
+            let filteredFights = [...fights];
+            
+            console.log('Initial filtered fights count:', filteredFights.length);
+            
+            // Apply filters
+            if (searchTerm) {
+                filteredFights = filteredFights.filter(fight => {
+                    const fighter1 = getFighterById(fight.fighter1);
+                    const fighter2 = getFighterById(fight.fighter2);
+                    return fighter1.name.toLowerCase().includes(searchTerm) || 
+                           fighter2.name.toLowerCase().includes(searchTerm);
+                });
+            }
+            
+            if (platformFilter !== 'all') {
+                filteredFights = filteredFights.filter(fight => 
+                    fight.platform === platformFilter
+                );
+            }
+            
+            if (resultFilter !== 'all') {
+                filteredFights = filteredFights.filter(fight => 
+                    fight.method === resultFilter
+                );
+            }
+            
+            // Sort by date descending
+            filteredFights.sort((a, b) => new Date(b.date) - new Date(a.date));
+            
+            const tableBody = document.getElementById('fights-table-body');
+            tableBody.innerHTML = '';
+            
+            if (filteredFights.length === 0) {
+                document.getElementById('no-fights-message').classList.remove('hidden');
+                return;
+            } else {
+                document.getElementById('no-fights-message').classList.add('hidden');
+            }
+            
+            filteredFights.forEach(fight => {
+                let fighter1 = getFighterById(fight.fighter1);
+                let fighter2 = getFighterById(fight.fighter2);
+                let winner = fight.winner === '0' ? null : getFighterById(fight.winner);
+                
+                if (!fighter1) {
+                    console.warn('Missing fighter1 data for fight:', fight.id, 'fighter ID:', fight.fighter1);
+                    fighter1 = { name: '[Deleted Fighter]', id: fight.fighter1 };
+                }
+                if (!fighter2) {
+                    console.warn('Missing fighter2 data for fight:', fight.id, 'fighter ID:', fight.fighter2);
+                    fighter2 = { name: '[Deleted Fighter]', id: fight.fighter2 };
+                }
+                if (winner === null && fight.winner !== '0') {
+                    console.warn('Missing winner data for fight:', fight.id, 'winner ID:', fight.winner);
+                    winner = { name: '[Deleted Fighter]', id: fight.winner };
+                }
+                
+                const row = document.createElement('tr');
+                row.className = 'border-b border-purple-500/10 hover:bg-purple-900/10 transition-colors';
+                
+                row.innerHTML = `
+                    <td class="py-3 px-4">${formatDate(fight.date)}</td>
+                    <td class="py-3 px-4">
+                        <div class="flex flex-col">
+                            <span class="${fight.winner === fight.fighter1 ? 'font-bold text-green-400' : fight.winner === '0' ? '' : 'text-gray-500'}">
+                                ${fighter1.name}
+                            </span>
+                            <span class="text-xs text-purple-400">vs</span>
+                            <span class="${fight.winner === fight.fighter2 ? 'font-bold text-green-400' : fight.winner === '0' ? '' : 'text-gray-500'}">
+                                ${fighter2.name}
+                            </span>
+                        </div>
+                    </td>
+                    <td class="py-3 px-4">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${fight.platform === 'PC' ? 'bg-blue-900/30 text-blue-300 border border-blue-500' : fight.platform === 'PS5' ? 'bg-blue-900/30 text-blue-300 border border-blue-500' : 'bg-green-900/30 text-green-300 border border-green-500'}">
+                            ${fight.platform}
+                        </span>
+                    </td>
+                    <td class="py-3 px-4">
+                        ${fight.winner === '0' ? 
+                          '<span class="text-gray-400">Draw</span>' : 
+                          `<span class="font-medium">${winner.name}</span>`}
+                    </td>
+                    <td class="py-3 px-4">
+                        ${fight.method === 'KO' ? 
+                          '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-900/30 text-red-300 border border-red-500"><i class="fas fa-bolt mr-1"></i> KO/TKO</span>' : 
+                          fight.method === 'Decision' ? 
+                          '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900/30 text-blue-300 border border-blue-500"><i class="fas fa-gavel mr-1"></i> Decision</span>' : 
+                          '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-700 text-gray-300 border border-gray-500"><i class="fas fa-handshake mr-1"></i> Draw</span>'}
+                    </td>
+                `;
+                
+                tableBody.appendChild(row);
+            });
+        }
+        
+        // Helper function to check if a fighter is in top 15 for their platform
+        function isTop15Fighter(fighterId, platform) {
+            // Get all fighters for this platform (not retired, not champion)
+            let platformFighters = fighters.filter(fighter => 
+                fighter.platform === platform && 
+                !fighter.retired &&
+                !fighter.champion
+            );
+            
+            // Sort by wins descending
+            platformFighters.sort((a, b) => b.wins - a.wins);
+            
+            // Get top 15 IDs
+            const top15Ids = platformFighters.slice(0, 15).map(f => f.id);
+            
+            return top15Ids.includes(fighterId);
+        }
+
+        // Helper function to check head-to-head record between two fighters
+        function getHeadToHeadRecord(fighter1Id, fighter2Id, platform) {
+            const headToHeadFights = fights.filter(fight => 
+                ((fight.fighter1 === fighter1Id && fight.fighter2 === fighter2Id) ||
+                 (fight.fighter1 === fighter2Id && fight.fighter2 === fighter1Id)) &&
+                fight.platform === platform
+            );
+            
+            let fighter1Wins = 0;
+            let fighter2Wins = 0;
+            let fighter1Score = 0;
+            let fighter2Score = 0;
+            
+            headToHeadFights.forEach(fight => {
+                const opponentRankValue = isTop15Fighter(fight.winner === fighter1Id ? fighter2Id : fighter1Id, platform) ? 1.5 : 1;
+                
+                if (fight.winner === fighter1Id) {
+                    fighter1Wins++;
+                    fighter1Score += opponentRankValue;
+                }
+                if (fight.winner === fighter2Id) {
+                    fighter2Wins++;
+                    fighter2Score += opponentRankValue;
+                }
+            });
+            
+            return { 
+                fighter1Wins, 
+                fighter2Wins,
+                fighter1Score,
+                fighter2Score
+            };
+        }
+
+        // Firestore functions
+        let fightersUnsubscribe = null;
+        let fightsUnsubscribe = null;
+
+        async function loadAllData() {
+            try {
+                // Set up realtime listener for fighters
+                fightersUnsubscribe = firebase.firestore().collection('fighters')
+                    .onSnapshot((snapshot) => {
+                        fighters = snapshot.docs.map(doc => {
+                            const data = doc.data();
+                            return {
+                                id: doc.id,
+                                name: data.name || '',
+                                platform: data.platform || 'PC',
+                                wins: data.wins || 0,
+                                losses: data.losses || 0,
+                                draws: data.draws || 0,
+                                koWins: data.koWins || 0,
+                                champion: data.champion || false,
+                                retired: data.retired || false
+                            };
+                        });
+                        
+                        // Update UI whenever fighters change
+                        renderFightersTable();
+                        renderPlatformRankings();
+                        populateFighterSelects();
+                        populateEditFighterSelect();
+                    }, (error) => {
+                        console.error("Error listening to fighters:", error);
+                    });
+                
+                // Set up realtime listener for fights with proper ordering and error logging
+                fightsUnsubscribe = firebase.firestore().collection('fights')
+                    .orderBy('date', 'desc')
+                    .onSnapshot((snapshot) => {
+                        console.log('Fights snapshot received with', snapshot.size, 'documents');
+                        
+                        if (snapshot.empty) {
+                            console.warn('No fight documents found in collection');
+                            fights = [];
+                        } else {
+                            fights = snapshot.docs.map(doc => {
+                                const data = doc.data();
+                                console.log('Processing fight document:', doc.id, data);
+                                
+                                if (!data.fighter1 || !data.fighter2) {
+                                    console.error('Invalid fight document - missing fighters:', doc.id, data);
+                                }
+                                
+                                return {
+                                    id: doc.id,
+                                    fighter1: data.fighter1 || '',
+                                    fighter2: data.fighter2 || '',
+                                    winner: data.winner || '0',
+                                    method: data.method || 'Decision',
+                                    platform: data.platform || 'PC',
+                                    date: data.date || new Date().toISOString().split('T')[0]
+                                };
+                            });
                         }
-                        className="bg-gray-700 text-white px-2 py-1 rounded w-20"
-                        placeholder={stat}
-                      />
-                    ))}
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={async () => {
-                        const oldName = f.originalName ?? f.name;
-                        const newName = f.name;
-                        await updateDoc(doc(db, 'fighters', f.firebaseId), { ...f, name: newName });
-                        await updateFighterNameInFights(oldName, newName);
-                        await fetchFighters();
-                        await fetchFights();
-                        await resyncFighterRecords();
-                      }}
-                      className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded"
-                    >
-                      Save
-                    </button>
-                    <button
-                      onClick={async () => {
-                        await deleteDoc(doc(db, 'fighters', f.firebaseId));
-                        const snap = await getDocs(collection(db, 'fights'));
-                        const fightsToDelete = snap.docs.filter(doc =>
-                          doc.data().fighter1 === f.name || doc.data().fighter2 === f.name
-                        );
-                        await Promise.all(fightsToDelete.map(docSnap =>
-                          deleteDoc(doc(db, 'fights', docSnap.id))
-                        ));
-                        await fetchFighters();
-                        await fetchFights();
-                        await resyncFighterRecords();
-                      }}
-                      className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded"
-                    >
-                      Delete
-                    </button>
-                  </div>
+                        
+                        // Recalculate stats and update UI whenever fights change
+                        recalculateAllStats().then(() => {
+                            renderFightersTable();
+                            renderPlatformRankings();
+                            renderFightsTable();
+                            populateDeleteFightSelect();
+                        });
+                    }, (error) => {
+                        console.error("Error listening to fights:", error);
+                    });
+            } catch (error) {
+                console.error("Error setting up listeners:", error);
+                alert("Error setting up realtime listeners. Please check console for details.");
+            }
+        }
+
+        // Clean up listeners when needed
+        function cleanupListeners() {
+            if (fightersUnsubscribe) {
+                fightersUnsubscribe();
+                fightersUnsubscribe = null;
+            }
+            if (fightsUnsubscribe) {
+                fightsUnsubscribe();
+                fightsUnsubscribe = null;
+            }
+        }
+
+        async function addFighterToFirestore(fighter) {
+            try {
+                const docRef = await firebase.firestore().collection('fighters').add(fighter);
+                return docRef.id;
+            } catch (error) {
+                console.error("Error adding fighter:", error);
+                throw error;
+            }
+        }
+
+        async function updateFighterInFirestore(fighterId, updates) {
+            try {
+                await firebase.firestore().doc(`fighters/${fighterId}`).update(updates);
+            } catch (error) {
+                console.error("Error updating fighter:", error);
+                throw error;
+            }
+        }
+
+        async function deleteFighterFromFirestore(fighterId) {
+            try {
+                await firebase.firestore().doc(`fighters/${fighterId}`).delete();
+            } catch (error) {
+                console.error("Error deleting fighter:", error);
+                throw error;
+            }
+        }
+
+        async function addFightToFirestore(fight) {
+            try {
+                const docRef = await firebase.firestore().collection('fights').add(fight);
+                return docRef.id;
+            } catch (error) {
+                console.error("Error adding fight:", error);
+                throw error;
+            }
+        }
+
+        async function deleteFightFromFirestore(fightId) {
+            try {
+                await firebase.firestore().doc(`fights/${fightId}`).delete();
+            } catch (error) {
+                console.error("Error deleting fight:", error);
+                throw error;
+            }
+        }
+
+        function getFighterById(id) {
+            return fighters.find(f => f.id === id) || null;
+        }
+
+        // Recalculate all fighter stats from fights data
+        async function recalculateAllStats() {
+            // First reset all fighter stats
+            fighters.forEach(fighter => {
+                fighter.wins = 0;
+                fighter.losses = 0;
+                fighter.draws = 0;
+                fighter.koWins = 0;
+            });
+
+            // Process all fights to update stats
+            fights.forEach(fight => {
+                const fighter1 = getFighterById(fight.fighter1);
+                const fighter2 = getFighterById(fight.fighter2);
+                
+                if (!fighter1 || !fighter2) return;
+
+                if (fight.winner === '0') {
+                    // Draw
+                    fighter1.draws += 1;
+                    fighter2.draws += 1;
+                } else if (fight.winner === fight.fighter1) {
+                    // Fighter 1 wins
+                    fighter1.wins += 1;
+                    fighter2.losses += 1;
+                    
+                    if (fight.method === 'KO') {
+                        fighter1.koWins += 1;
+                    }
+                } else {
+                    // Fighter 2 wins
+                    fighter2.wins += 1;
+                    fighter1.losses += 1;
+                    
+                    if (fight.method === 'KO') {
+                        fighter2.koWins += 1;
+                    }
+                }
+            });
+
+            // Update all fighters in Firestore
+            const updatePromises = fighters.map(fighter => {
+                return updateFighterInFirestore(fighter.id, {
+                    wins: fighter.wins,
+                    losses: fighter.losses,
+                    draws: fighter.draws,
+                    koWins: fighter.koWins
+                });
+            });
+
+            await Promise.all(updatePromises);
+        }
+        
+        // Format date for display
+        function formatDate(dateString) {
+            // Parse the date string as local time (not UTC)
+            const date = new Date(dateString + 'T00:00:00'); // Add time component to avoid UTC conversion
+            const options = { year: 'numeric', month: 'short', day: 'numeric' };
+            return date.toLocaleDateString(undefined, options);
+        }
+        
+        // Admin functions
+        function adminLogin() {
+            const password = document.getElementById('admin-password').value;
+            const errorElement = document.getElementById('login-error');
+            
+            if (password === ADMIN_PASSWORD) {
+                isAdmin = true;
+                document.getElementById('admin-login-section').classList.add('hidden');
+                document.getElementById('admin-controls').classList.remove('hidden');
+                errorElement.classList.add('hidden');
+                
+                // Populate admin selects
+                populateFighterSelects();
+                populateEditFighterSelect();
+                populateDeleteFightSelect();
+            } else {
+                errorElement.classList.remove('hidden');
+            }
+        }
+        
+        function populateFighterSelects() {
+            const select1 = document.getElementById('fight-fighter1');
+            const select2 = document.getElementById('fight-fighter2');
+            
+            // Start with empty dropdowns
+            select1.innerHTML = '<option value="">Select Fighter 1</option>';
+            select2.innerHTML = '<option value="">Select Fighter 2</option>';
+            
+            // Don't populate fighters here - they'll be populated when platform is selected
+            // via updateFighterSelects()
+
+            // Add event listeners to update winner dropdown when fighters change
+            document.getElementById('fight-platform').addEventListener('change', updateFighterSelects);
+            select1.addEventListener('change', updateWinnerDropdown);
+            select2.addEventListener('change', updateWinnerDropdown);
+        }
+
+        function updateFighterSelects() {
+            const platform = document.getElementById('fight-platform').value;
+            const fighter1Select = document.getElementById('fight-fighter1');
+            const fighter2Select = document.getElementById('fight-fighter2');
+            
+            // Clear both dropdowns initially
+            fighter1Select.innerHTML = '<option value="">Select Fighter 1</option>';
+            fighter2Select.innerHTML = '<option value="">Select Fighter 2</option>';
+            
+            // Only populate if platform is selected
+            if (platform) {
+                // Filter and sort fighters by platform and name
+                const platformFighters = fighters
+                    .filter(fighter => fighter.platform === platform)
+                    .sort((a, b) => a.name.localeCompare(b.name));
+                
+                // Populate fighter1 dropdown
+                platformFighters.forEach(fighter => {
+                    const option = document.createElement('option');
+                    option.value = fighter.id;
+                    option.textContent = fighter.name;
+                    fighter1Select.appendChild(option);
+                });
+                
+                // Populate fighter2 dropdown
+                platformFighters.forEach(fighter => {
+                    const option = document.createElement('option');
+                    option.value = fighter.id;
+                    option.textContent = fighter.name;
+                    fighter2Select.appendChild(option);
+                });
+            }
+            
+            // Clear winner dropdown
+            updateWinnerDropdown();
+        }
+
+        function updateWinnerDropdown() {
+            const winnerSelect = document.getElementById('fight-winner');
+            const fighter1Select = document.getElementById('fight-fighter1');
+            const fighter2Select = document.getElementById('fight-fighter2');
+            
+            // Clear existing options
+            winnerSelect.innerHTML = '<option value="0" disabled>Select winner or choose Draw</option>';
+            
+            // Only update if both fighters are selected
+            if (fighter1Select.value && fighter2Select.value) {
+                const fighter1 = getFighterById(fighter1Select.value);
+                const fighter2 = getFighterById(fighter2Select.value);
+                
+                if (fighter1 && fighter2) {
+                    // Add fighter options with their actual names
+                    const option1 = document.createElement('option');
+                    option1.value = fighter1.id;
+                    option1.textContent = fighter1.name;
+                    winnerSelect.appendChild(option1);
+                    
+                    const option2 = document.createElement('option');
+                    option2.value = fighter2.id;
+                    option2.textContent = fighter2.name;
+                    winnerSelect.appendChild(option2);
+                }
+            }
+            
+            // Always keep the Draw option available
+            const drawOption = document.createElement('option');
+            drawOption.value = '0';
+            drawOption.textContent = 'Draw';
+            winnerSelect.appendChild(drawOption);
+        }
+        
+        function populateEditFighterSelect() {
+            const select = document.getElementById('edit-fighter-select');
+            
+            select.innerHTML = '<option value="">Select a fighter to edit</option>';
+            
+            fighters.forEach(fighter => {
+                const option = document.createElement('option');
+                option.value = fighter.id;
+                option.textContent = `${fighter.name} (${fighter.platform})`;
+                select.appendChild(option);
+            });
+        }
+        
+        function populateDeleteFightSelect() {
+            const select = document.getElementById('delete-fight-select');
+            
+            select.innerHTML = '<option value="">Select a fight to delete</option>';
+            
+            fights.forEach(fight => {
+                const fighter1 = getFighterById(fight.fighter1);
+                const fighter2 = getFighterById(fight.fighter2);
+                
+                const option = document.createElement('option');
+                option.value = fight.id;
+                option.textContent = `${fighter1.name} vs ${fighter2.name} (${fight.platform}, ${formatDate(fight.date)})`;
+                select.appendChild(option);
+            });
+        }
+        
+        function loadFighterData() {
+            const fighterId = document.getElementById('edit-fighter-select').value;
+            if (!fighterId) return;
+            
+            const fighter = getFighterById(fighterId);
+            if (!fighter) return;
+            
+            document.getElementById('edit-fighter-name').value = fighter.name;
+            document.getElementById('edit-fighter-platform').value = fighter.platform;
+            document.getElementById('edit-fighter-wins').textContent = fighter.wins;
+            document.getElementById('edit-fighter-losses').textContent = fighter.losses;
+            document.getElementById('edit-fighter-draws').textContent = fighter.draws;
+            document.getElementById('edit-fighter-kos').textContent = fighter.koWins;
+            
+            const championBtn = document.getElementById('champion-toggle-btn');
+            if (fighter.champion) {
+                championBtn.innerHTML = '<i class="fas fa-times mr-2"></i>Remove Champion';
+                championBtn.classList.remove('bg-yellow-900/50', 'border-yellow-500', 'glow-yellow');
+                championBtn.classList.add('bg-red-900/50', 'border-red-500', 'glow-red');
+            } else {
+                championBtn.innerHTML = '<i class="fas fa-crown mr-2"></i>Make Champion';
+                championBtn.classList.remove('bg-red-900/50', 'border-red-500', 'glow-red');
+                championBtn.classList.add('bg-yellow-900/50', 'border-yellow-500', 'glow-yellow');
+            }
+        }
+        
+        async function addFighter() {
+            const name = document.getElementById('new-fighter-name').value.trim();
+            const platform = document.getElementById('new-fighter-platform').value;
+            
+            if (!name) {
+                showAlert('error', 'Please enter a fighter name');
+                return;
+            }
+            
+            if (!platform) {
+                showAlert('error', 'Please select a platform');
+                return;
+            }
+            
+            // Check if fighter with same name already exists on this platform
+            const duplicateFighter = fighters.find(f => 
+                f.name.toLowerCase() === name.toLowerCase() && 
+                f.platform === platform
+            );
+            
+            if (duplicateFighter) {
+                showAlert('error', `A fighter named "${name}" already exists on ${platform}`);
+                return;
+            }
+            
+            const newFighter = {
+                name,
+                platform,
+                wins: 0,
+                losses: 0,
+                draws: 0,
+                koWins: 0,
+                champion: false,
+                retired: false
+            };
+            
+            try {
+                const fighterId = await addFighterToFirestore(newFighter);
+                newFighter.id = fighterId;
+                fighters.push(newFighter);
+            } catch (error) {
+                console.error("Error adding fighter:", error);
+                alert("Error adding fighter. Please check console for details.");
+                return;
+            }
+            
+            // Reset form
+            document.getElementById('new-fighter-name').value = '';
+            
+            // Update UI
+            renderFightersTable();
+            renderPlatformRankings();
+            populateFighterSelects();
+            populateEditFighterSelect();
+            
+            // Show success
+            showAlert('success', `Fighter ${name} added successfully!`);
+        }
+        
+        async function updateFighter() {
+            const fighterId = document.getElementById('edit-fighter-select').value;
+            if (!fighterId) {
+                showAlert('error', 'Please select a fighter to update');
+                return;
+            }
+            
+            const fighter = getFighterById(fighterId);
+            if (!fighter) return;
+            
+            const name = document.getElementById('edit-fighter-name').value.trim();
+            const platform = document.getElementById('edit-fighter-platform').value;
+            
+            if (!name) {
+                showAlert('error', 'Please enter a fighter name');
+                return;
+            }
+            
+            // Check if another fighter with same name already exists on this platform
+            const duplicateFighter = fighters.find(f => 
+                f.id !== fighterId &&
+                f.name.toLowerCase() === name.toLowerCase() && 
+                f.platform === platform
+            );
+            
+            if (duplicateFighter) {
+                showAlert('error', `A fighter named "${name}" already exists on ${platform}`);
+                return;
+            }
+            
+            // Check if platform changed
+            const oldPlatform = fighter.platform;
+            const platformChanged = oldPlatform !== platform;
+            
+            // Update fighter
+            const updates = {
+                name,
+                platform
+            };
+            
+            await updateFighterInFirestore(fighterId, updates);
+            
+            fighter.name = name;
+            fighter.platform = platform;
+            
+            // If platform changed, delete fights from old platform
+            if (platformChanged) {
+                fights = fights.filter(fight => {
+                    // Keep fights that don't involve this fighter
+                    if (fight.fighter1 !== fighterId && fight.fighter2 !== fighterId) {
+                        return true;
+                    }
+                    // Only keep fights on the new platform
+                    return fight.platform === platform;
+                });
+                
+                // Reset fighter stats since we removed fights
+                fighter.wins = 0;
+                fighter.losses = 0;
+                fighter.draws = 0;
+                fighter.koWins = 0;
+                
+                // Recalculate stats for remaining fights
+                recalculateAllStats();
+                renderPlatformRankings();
+            }
+            
+            // Update UI
+            renderFightersTable();
+            renderPlatformRankings();
+            populateFighterSelects();
+            populateEditFighterSelect();
+            
+            // Show success
+            showAlert('success', `Fighter ${name} updated successfully! ${platformChanged ? 'Fights from old platform have been removed.' : ''}`);
+        }
+        
+        function toggleChampionStatus() {
+            const fighterId = document.getElementById('edit-fighter-select').value;
+            if (!fighterId) {
+                alert('Please select a fighter first');
+                return;
+            }
+            
+            const fighter = getFighterById(fighterId);
+            if (!fighter) return;
+            
+            currentAction = 'toggleChampion';
+            currentActionData = { fighterId, fighterName: fighter.name };
+            
+            document.getElementById('modal-title').textContent = fighter.champion ? 'Remove Champion' : 'Make Champion';
+            document.getElementById('modal-message').innerHTML = `
+                Are you sure you want to ${fighter.champion ? 'remove' : 'make'} <strong>${fighter.name}</strong> ${fighter.champion ? 'from' : 'the'} champion?<br><br>
+                ${fighter.champion ? 'They will appear in rankings again.' : 'They will be removed from rankings and shown as champion.'}
+            `;
+            document.getElementById('confirm-action-btn').innerHTML = 
+                `<i class="fas fa-crown mr-2"></i>${fighter.champion ? 'Remove' : 'Make'} Champion`;
+            
+            document.getElementById('confirmation-modal').classList.remove('hidden');
+        }
+
+        async function performChampionToggle(fighterId) {
+            const fighter = getFighterById(fighterId);
+            if (!fighter) return;
+            
+            // Remove champion status from all fighters on this platform
+            if (!fighter.champion) {
+                fighters.forEach(f => {
+                    if (f.platform === fighter.platform) {
+                        f.champion = false;
+                    }
+                });
+            }
+            
+            // Toggle this fighter's champion status
+            fighter.champion = !fighter.champion;
+            await updateFighterInFirestore(fighterId, { champion: fighter.champion });
+            
+            // Update UI
+            loadFighterData();
+            renderFightersTable();
+            renderPlatformRankings();
+            
+            // Show success
+            showAlert('success', `Fighter ${fighter.name} ${fighter.champion ? 'is now the champion!' : 'is no longer the champion.'}`);
+        }
+        
+        async function recordFight() {
+            const fighter1Id = document.getElementById('fight-fighter1').value;
+            const fighter2Id = document.getElementById('fight-fighter2').value;
+            const platform = document.getElementById('fight-platform').value;
+            const result = document.getElementById('fight-result').value;
+            const winner = document.getElementById('fight-winner').value;
+            // Get the date input and parse it as local date
+            const dateInput = document.getElementById('fight-date').value;
+            const date = new Date(dateInput + 'T00:00:00').toISOString().split('T')[0];
+            
+            if (!fighter1Id || !fighter2Id) {
+                showAlert('error', 'Please select both fighters');
+                return;
+            }
+            
+            if (!platform) {
+                showAlert('error', 'Please select a platform');
+                return;
+            }
+            
+            if (!result) {
+                showAlert('error', 'Please select a result type');
+                return;
+            }
+            
+            if (!winner) {
+                showAlert('error', 'Please select a winner or choose Draw');
+                return;
+            }
+            
+            if (!dateInput) {
+                showAlert('error', 'Please select a date');
+                return;
+            }
+            
+            if (fighter1Id === fighter2Id) {
+                showAlert('error', 'A fighter cannot fight themselves');
+                return;
+            }
+            
+            if (result === 'Draw' && winner !== '0') {
+                showAlert('error', 'For a draw, please select "Draw" in the winner field');
+                return;
+            }
+            
+            if (result !== 'Draw' && winner === '0') {
+                showAlert('error', 'Please select a winner for non-draw results');
+                return;
+            }
+            
+            if (!date) {
+                alert('Please select a date');
+                return;
+            }
+            
+            // Get the fighters
+            const fighter1 = getFighterById(fighter1Id);
+            const fighter2 = getFighterById(fighter2Id);
+            
+            if (fighter1.platform !== fighter2.platform) {
+                showAlert('error', 'Fighters must be from the same platform');
+                return;
+            }
+            
+            if (platform !== fighter1.platform) {
+                showAlert('error', 'Selected platform must match fighters\' platform');
+                return;
+            }
+            
+            // Create the fight record
+            const newFight = {
+                fighter1: fighter1Id,
+                fighter2: fighter2Id,
+                winner: winner,
+                method: result,
+                platform,
+                date
+            };
+            
+            try {
+                const fightId = await addFightToFirestore(newFight);
+                newFight.id = fightId;
+                fights.push(newFight);
+            } catch (error) {
+                console.error("Error recording fight:", error);
+                showAlert('error', "Error recording fight. Please check console for details.");
+                return;
+            }
+            
+            // Recalculate all stats to ensure consistency
+            recalculateAllStats();
+            
+            // Reset form
+            document.getElementById('fight-date').valueAsDate = new Date();
+            
+            // Update UI
+            renderFightersTable();
+            renderPlatformRankings();
+            renderFightsTable();
+            populateDeleteFightSelect();
+            
+            // Show success
+            showAlert('success', `Fight recorded successfully! ${fighter1.name} vs ${fighter2.name} - ${fight.winner === '0' ? 'Draw' : getFighterById(fight.winner).name} by ${fight.method}`);
+        }
+
+        
+        function confirmRetireFighter() {
+            const fighterId = document.getElementById('edit-fighter-select').value;
+            if (!fighterId) {
+                alert('Please select a fighter to retire');
+                return;
+            }
+            
+            const fighter = getFighterById(fighterId);
+            if (!fighter) return;
+            
+            currentAction = fighter.retired ? 'unretireFighter' : 'retireFighter';
+            currentActionData = { fighterId, fighterName: fighter.name };
+            
+            document.getElementById('modal-title').textContent = fighter.retired ? 'Unretire Fighter' : 'Retire Fighter';
+            document.getElementById('modal-message').innerHTML = `
+                Are you sure you want to ${fighter.retired ? 'unretire' : 'retire'} <strong>${fighter.name}</strong>?<br><br>
+                ${fighter.retired ? 'They will appear in rankings again.' : 'They will be removed from rankings but their record will be preserved.'}
+            `;
+            document.getElementById('confirm-action-btn').innerHTML = 
+                `<i class="fas fa-user-${fighter.retired ? 'plus' : 'slash'} mr-2"></i>${fighter.retired ? 'Unretire' : 'Retire'} Fighter`;
+            
+            document.getElementById('confirmation-modal').classList.remove('hidden');
+        }
+
+        function confirmDeleteFighter() {
+            const fighterId = document.getElementById('edit-fighter-select').value;
+            if (!fighterId) {
+                alert('Please select a fighter to delete');
+                return;
+            }
+            
+            const fighter = getFighterById(fighterId);
+            if (!fighter) return;
+            
+            // Check if fighter has any fights
+            const fighterFights = fights.filter(fight => 
+                fight.fighter1 === fighterId || fight.fighter2 === fighterId
+            );
+            
+            currentAction = 'deleteFighter';
+            currentActionData = { fighterId, fighterName: fighter.name, fightCount: fighterFights.length };
+            
+            document.getElementById('modal-title').textContent = 'Delete Fighter';
+            document.getElementById('modal-message').innerHTML = `
+                Are you sure you want to delete <strong>${fighter.name}</strong>?<br><br>
+                This will also delete <strong>${fighterFights.length}</strong> associated fights.${
+                    fighter.champion ? '<br><br>This will also remove their champion status.' : ''
+                }
+            `;
+            document.getElementById('confirm-action-btn').innerHTML = '<i class="fas fa-trash mr-2"></i>Delete Fighter';
+            
+            document.getElementById('confirmation-modal').classList.remove('hidden');
+        }
+        
+        function confirmDeleteFight() {
+            const fightId = document.getElementById('delete-fight-select').value;
+            if (!fightId) {
+                alert('Please select a fight to delete');
+                return;
+            }
+            
+            const fight = fights.find(f => f.id === fightId);
+            if (!fight) return;
+            
+            const fighter1 = getFighterById(fight.fighter1);
+            const fighter2 = getFighterById(fight.fighter2);
+            
+            currentAction = 'deleteFight';
+            currentActionData = { fightId, fighter1Name: fighter1.name, fighter2Name: fighter2.name, date: fight.date };
+            
+            document.getElementById('modal-title').textContent = 'Delete Fight';
+            document.getElementById('modal-message').innerHTML = `
+                Are you sure you want to delete this fight?<br><br>
+                <strong>${fighter1.name}</strong> vs <strong>${fighter2.name}</strong><br>
+                ${formatDate(fight.date)} (${fight.platform})<br>
+                Result: ${fight.winner === '0' ? 'Draw' : getFighterById(fight.winner).name} by ${fight.method}
+            `;
+            document.getElementById('confirm-action-btn').innerHTML = '<i class="fas fa-trash mr-2"></i>Delete Fight';
+            
+            document.getElementById('confirmation-modal').classList.remove('hidden');
+        }
+        
+        function closeRankingModal() {
+            document.getElementById('ranking-details-modal').classList.add('hidden');
+        }
+
+        function closeModal() {
+            document.getElementById('confirmation-modal').classList.add('hidden');
+            currentAction = null;
+            currentActionData = null;
+        }
+        
+        async function retireFighter(fighterId) {
+            const fighter = getFighterById(fighterId);
+            if (!fighter) return;
+            
+            fighter.retired = true;
+            await updateFighterInFirestore(fighterId, { retired: true });
+            
+            // Update UI
+            renderFightersTable();
+            renderPlatformRankings();
+            populateEditFighterSelect();
+            
+            showAlert('success', `${fighter.name} has been retired and will no longer appear in rankings.`);
+        }
+        
+        async function unretireFighter(fighterId) {
+            const fighter = getFighterById(fighterId);
+            if (!fighter) return;
+            
+            fighter.retired = false;
+            await updateFighterInFirestore(fighterId, { retired: false });
+            
+            // Update UI
+            renderFightersTable();
+            renderPlatformRankings();
+            populateEditFighterSelect();
+            
+            showAlert('success', `${fighter.name} has been unretired and will appear in rankings again.`);
+        }
+
+        function confirmAction() {
+            if (!currentAction || !currentActionData) {
+                closeModal();
+                return;
+            }
+            
+            if (currentAction === 'deleteFighter') {
+                deleteFighter(currentActionData.fighterId);
+            } else if (currentAction === 'deleteFight') {
+                deleteFight(currentActionData.fightId);
+            } else if (currentAction === 'retireFighter') {
+                retireFighter(currentActionData.fighterId);
+            } else if (currentAction === 'unretireFighter') {
+                unretireFighter(currentActionData.fighterId);
+            } else if (currentAction === 'toggleChampion') {
+                performChampionToggle(currentActionData.fighterId);
+            }
+            
+            closeModal();
+        }
+        
+        async function deleteFighter(fighterId) {
+            // First get all fights involving this fighter
+            const fighterFights = fights.filter(fight => 
+                fight.fighter1 === fighterId || fight.fighter2 === fighterId
+            );
+            
+            // Get IDs of all opponents who fought this fighter
+            const opponentIds = [];
+            fighterFights.forEach(fight => {
+                const opponentId = fight.fighter1 === fighterId ? fight.fighter2 : fight.fighter1;
+                if (!opponentIds.includes(opponentId)) {
+                    opponentIds.push(opponentId);
+                }
+            });
+            
+            // Remove all fights involving this fighter
+            fights = fights.filter(fight => fight.fighter1 !== fighterId && fight.fighter2 !== fighterId);
+            
+            // Remove the fighter completely
+            await deleteFighterFromFirestore(fighterId);
+            fighters = fighters.filter(f => f.id !== fighterId);
+            
+            // Reset stats for all opponents who fought this fighter
+            opponentIds.forEach(opponentId => {
+                const opponent = getFighterById(opponentId);
+                if (opponent) {
+                    opponent.wins = 0;
+                    opponent.losses = 0;
+                    opponent.draws = 0;
+                    opponent.koWins = 0;
+                }
+            });
+            
+            // Reset stats for both fighters involved
+            const fighter1 = getFighterById(fight.fighter1);
+            const fighter2 = getFighterById(fight.fighter2);
+            
+            if (fighter1) {
+                fighter1.wins = 0;
+                fighter1.losses = 0;
+                fighter1.draws = 0;
+                fighter1.koWins = 0;
+            }
+            
+            if (fighter2) {
+                fighter2.wins = 0;
+                fighter2.losses = 0;
+                fighter2.draws = 0;
+                fighter2.koWins = 0;
+            }
+            
+            // Recalculate all stats to ensure consistency
+            await recalculateAllStats();
+            
+            // Update all UI elements that might be affected
+            renderFightersTable();
+            renderPlatformRankings();
+            renderFightsTable();
+            populateFighterSelects();
+            populateEditFighterSelect();
+            populateDeleteFightSelect();
+            
+            // Update UI
+            renderFightersTable();
+            renderPlatformRankings();
+            renderFightsTable();
+            populateFighterSelects();
+            populateEditFighterSelect();
+            populateDeleteFightSelect();
+            
+            // Reset edit form
+            document.getElementById('edit-fighter-select').value = '';
+            document.getElementById('edit-fighter-name').value = '';
+            document.getElementById('edit-fighter-platform').value = 'PC';
+            
+            showAlert('success', `Fighter ${currentActionData.fighterName} and ${currentActionData.fightCount} associated fights deleted successfully! Opponents' records have been updated.`);
+        }
+        
+        function showRankingDetails(fighterId, platform) {
+            const fighter = getFighterById(fighterId);
+            if (!fighter) return;
+
+            // Calculate ranking details
+            const recordPoints = (fighter.wins * 3) - (fighter.losses * 1) + (fighter.draws * 1);
+            
+            let opponentQualityBonus = 0;
+            const fighterFights = fights.filter(fight => 
+                (fight.fighter1 === fighter.id || fight.fighter2 === fighter.id) &&
+                fight.platform === platform
+            );
+            
+            fighterFights.forEach(fight => {
+                const opponentId = fight.fighter1 === fighter.id ? fight.fighter2 : fight.fighter1;
+                const opponent = getFighterById(opponentId);
+                if (opponent) {
+                    const opponentWinPct = opponent.wins + opponent.losses > 0 ? 
+                        opponent.wins / (opponent.wins + opponent.losses) : 0;
+                    
+                    if (fight.winner === fighter.id) {
+                        opponentQualityBonus += opponentWinPct * 2;
+                    }
+                    else if (fight.winner === opponentId) {
+                        opponentQualityBonus -= (1 - opponentWinPct) * 0.5;
+                    }
+                }
+            });
+            
+            // Recent performance bonus (last 5 fights)
+            const recentFights = fighterFights
+                .sort((a, b) => new Date(b.date) - new Date(a.date))
+                .slice(0, 5);
+            
+            let recentFormBonus = 0;
+            recentFights.forEach(fight => {
+                if (fight.winner === fighter.id) recentFormBonus += 1;
+                else if (fight.winner === '0') recentFormBonus += 0.3;
+            });
+
+            // Get head-to-head records against other top fighters
+            let top15HeadToHead = '';
+            const top15Fighters = fighters.filter(f => 
+                f.platform === platform && 
+                !f.retired &&
+                !f.champion &&
+                f.id !== fighterId
+            ).sort((a, b) => b.wins - a.wins).slice(0, 15);
+            
+            top15Fighters.forEach(opponent => {
+                const h2h = getHeadToHeadRecord(fighterId, opponent.id, platform);
+                if (h2h.fighter1Wins > 0 || h2h.fighter2Wins > 0) {
+                    top15HeadToHead += `
+                        <div class="text-xs">
+                            vs ${opponent.name}: ${h2h.fighter1Wins}-${h2h.fighter2Wins}
+                        </div>
+                    `;
+                }
+            });
+
+            // Format the details
+            document.getElementById('ranking-fighter-name').textContent = `${fighter.name} (${platform})`;
+            
+            const detailsContent = document.getElementById('ranking-details-content');
+            detailsContent.innerHTML = `
+                <div class="mb-3">
+                    <div class="font-semibold mb-1">Record: ${fighter.wins}-${fighter.losses}-${fighter.draws}</div>
+                    <div class="text-xs text-gray-400 mb-1">${fighter.koWins} KO/TKO wins</div>
                 </div>
-              ))}
-          </div>
-        </div>
-
-        {/* 📂 Manage Fights */}
-        <div>
-          <h2 className="text-xl font-bold mb-2">📂 Manage Fights</h2>
-          <input
-            type="text"
-            placeholder="Search fights..."
-            value={searchFight}
-            onChange={e => setSearchFight(e.target.value)}
-            className="mb-2 px-3 py-1 rounded bg-gray-800 text-white w-full"
-          />
-          <div className="space-y-3">
-            {fights
-              .filter(f =>
-                f.fighter1.toLowerCase().includes(searchFight.toLowerCase()) ||
-                f.fighter2.toLowerCase().includes(searchFight.toLowerCase()) ||
-                f.winner.toLowerCase().includes(searchFight.toLowerCase())
-              )
-              .map(fight => (
-                <div key={fight.id} className="bg-gray-800 p-4 rounded shadow-md flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-                  <div className="text-white">
-                    <p><strong>{fight.fighter1}</strong> vs <strong>{fight.fighter2}</strong></p>
-                    <p>🏆 Winner: <strong>{fight.winner}</strong> ({fight.method})</p>
-                    <p>🕓 Date: {fight.date}</p>
-                    <p>🎮 Platform: {fight.platform}</p>
-                  </div>
-                  <button
-                    onClick={async () => {
-                      await deleteDoc(doc(db, 'fights', fight.id));
-                      setFights(prev => prev.filter(f => f.id !== fight.id));
-                      await resyncFighterRecords();
-                    }}
-                    className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded"
-                  >
-                    Delete
-                  </button>
+                
+                <div class="mb-3">
+                    <div class="font-semibold mb-1">Ranking Breakdown:</div>
+                    <div class="text-xs mb-1">Base Record Points: ${recordPoints.toFixed(1)}</div>
+                    <div class="text-xs mb-1">Opponent Quality Bonus: ${opponentQualityBonus.toFixed(1)}</div>
+                    <div class="text-xs mb-1">Recent Form Bonus: ${recentFormBonus.toFixed(1)}</div>
+                    <div class="mt-2 text-blue-300 font-medium">Total Ranking Points: ${(recordPoints + opponentQualityBonus + recentFormBonus).toFixed(1)}</div>
                 </div>
-              ))}
-          </div>
-        </div>
+                
+                ${top15HeadToHead ? `
+                <div class="mb-3">
+                    <div class="font-semibold mb-1">Head-to-Head vs Top 15:</div>
+                    ${top15HeadToHead}
+                </div>
+                ` : ''}
+                
+                ${recentFights.length > 0 ? `
+                <div class="mb-3">
+                    <div class="font-semibold mb-1">Recent Fights:</div>
+                    ${recentFights.map(fight => {
+                        const opponentId = fight.fighter1 === fighter.id ? fight.fighter2 : fight.fighter1;
+                        const opponent = getFighterById(opponentId);
+                        const result = fight.winner === fighter.id ? 'W' : fight.winner === '0' ? 'D' : 'L';
+                        const resultClass = result === 'W' ? 'text-green-400' : result === 'L' ? 'text-red-400' : 'text-gray-400';
+                        return `<div class="text-xs ${resultClass}">${result} vs ${opponent.name} (${fight.method})</div>`;
+                    }).join('')}
+                </div>
+                ` : ''}
+            `;
 
-      </div>
-    )}
-  </div>
-)}
-        </motion.div>
-      </AnimatePresence>
-    </div>
-  );
-}
+            document.getElementById('ranking-details-modal').classList.remove('hidden');
+        }
 
-
-/* --------------------------------------------------------------- */
-/*   NORMALIZED HEAD-TO-HEAD + RECENCY RANKER (DROP-IN)            */
-/* --------------------------------------------------------------- */
-function calculateRankings(
-  fighters: Fighter[],
-  fights: Fight[],
-  platform: Platform
-): Fighter[] {
-  const norm = (s: string) => s.trim().toLowerCase();
-  const today = new Date();
-  const recentCutoff = new Date();
-  recentCutoff.setDate(today.getDate() - 20);
-
-  // Filter data for this platform
-  const fightersP = fighters.filter(f => f.platform === platform);
-  const fightsP   = fights.filter(f => f.platform === platform);
-
-  /* 1️⃣ Build base + recency score */
-  const score: Record<string, number> = {};
-  fightersP.forEach(f => {
-    score[norm(f.name)] = f.wins * 5 - f.losses * 2 + f.koWins * 2;
-  });
-
-  /* 2️⃣ Head-to-head win counts  + log */
-  const h2h: Record<string, Record<string, number>> = {};
-  fightsP.forEach(f => {
-    if (f.winner === 'Draw') return;
-    const w = norm(f.winner);
-    const l = norm(f.winner === f.fighter1 ? f.fighter2 : f.fighter1);
-
-    if (!h2h[w]) h2h[w] = {};
-    h2h[w][l] = (h2h[w][l] || 0) + 1;
-
-    // Recency bonus
-    const fightDate = new Date(f.date);
-    if (fightDate >= recentCutoff) {
-      score[w] += 2;
-    }
-
-    // Debug log
-    console.log(
-      `%c${f.winner} beat ${l} (${f.date}) [${platform}]`,
-      'color:#0af'
-    );
-  });
-
-  /* 3️⃣ Sort with STRICT H2H override */
-  const sorted = [...fightersP].sort((a, b) => {
-    const aN = norm(a.name);
-    const bN = norm(b.name);
-
-    const aBeatsB = h2h[aN]?.[bN] || 0;
-    const bBeatsA = h2h[bN]?.[aN] || 0;
-
-    if (aBeatsB !== bBeatsA) return bBeatsA - aBeatsB; // more wins ⇒ higher
-    return (score[bN] || 0) - (score[aN] || 0);        // fallback score
-  });
-
-  /* 4️⃣ Final debug print */
-  console.log(
-    `%c🏆 ${platform} ranking →`,
-    'color:#fa0',
-    sorted.map(f => f.name)
-  );
-
-  return sorted;
-}
-/* --------------------------------------------------------------- */
+        async function deleteFight(fightId) {
+            const fight = fights.find(f => f.id === fightId);
+            if (!fight) return;
+            
+            const fighter1 = getFighterById(fight.fighter1);
+            const fighter2 = getFighterById(fight.fighter2);
+            
+            // Remove the fight
+            await deleteFightFromFirestore(fightId);
+            fights = fights.filter(f => f.id !== fightId);
+            
+            // Recalculate all stats to ensure consistency
+            await recalculateAllStats();
+            
+            // Update UI
+            renderFightersTable();
+            renderPlatformRankings();
+            renderFightsTable();
+            populateDeleteFightSelect();
+            
+            showAlert('success', `Fight between ${currentActionData.fighter1Name} and ${currentActionData.fighter2Name} deleted successfully! Fighter records have been updated.`);
+        }
+    </script>
+</body>
+</html>
